@@ -184,6 +184,9 @@ bool configureWriter(archive* a, const CompressOptions& opt, std::string& err) {
     switch (opt.format) {
         case OutFormat::Zip:
             archive_write_set_format_zip(a);
+            // Store names as UTF-8 (and set the ZIP UTF-8 flag). Without this, libarchive on
+            // Windows converts names to the ANSI code page and drops characters such as CJK.
+            if (!setOpt(a, "zip:hdrcharset=UTF-8", err)) return false;
             if (level == 0) {
                 if (!setOpt(a, "zip:compression=store", err)) return false;
             } else {
@@ -220,7 +223,7 @@ bool configureWriter(archive* a, const CompressOptions& opt, std::string& err) {
             return true;
         case OutFormat::Cpio:
             archive_write_set_format_cpio_newc(a);
-            return true;
+            return setOpt(a, "cpio:hdrcharset=UTF-8", err);  // see ZIP: avoid the ANSI code page
         case OutFormat::Kmp:
             break;
     }
@@ -504,6 +507,7 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
         archive* a = archive_read_new();
         archive_read_support_filter_all(a);
         archive_read_support_format_all(a);
+        archive_read_set_options(a, "cpio:hdrcharset=UTF-8,tar:hdrcharset=UTF-8");  // see kz_archive
         if (!password.empty()) archive_read_add_passphrase(a, password.c_str());
         int rc;
         if (src.inMemory())

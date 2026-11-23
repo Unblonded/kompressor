@@ -96,8 +96,13 @@ struct LaReader {
             archive_read_support_filter_all(r);
             if (tryRaw)
                 archive_read_support_format_raw(r);
-            else
+            else {
                 archive_read_support_format_all(r);
+                // CPIO and ustar/GNU TAR names carry no charset marker; libarchive would decode
+                // them with the local code page (OEM/ANSI on Windows). Treat them as UTF-8, which
+                // is what Linux/macOS tools and our own writer produce. PAX/ZIP/7Z are unaffected.
+                archive_read_set_options(r, "cpio:hdrcharset=UTF-8,tar:hdrcharset=UTF-8");
+            }
             if (!password.empty()) archive_read_add_passphrase(r, password.c_str());
             int rc;
             if (src.inMemory()) {
