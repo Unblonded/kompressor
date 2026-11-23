@@ -98,7 +98,11 @@ endif()
 # CLI
 # ---------------------------------------------------------------------------
 if(KOMPRESSOR_BUILD_CLI)
-  add_executable(kompressor-cli src/cli/main.cpp)
+  if(WIN32)
+    add_executable(kompressor-cli src/cli/main.cpp packaging/windows/kompressor-cli.rc)
+  else()
+    add_executable(kompressor-cli src/cli/main.cpp)
+  endif()
   target_link_libraries(kompressor-cli PRIVATE kompressor_core)
 endif()
 
@@ -146,7 +150,9 @@ if(KOMPRESSOR_BUILD_GUI)
     src/gui/main.cpp
     src/gui/app.cpp
     src/gui/app_draw.cpp
+    src/gui/app_icon.cpp
     src/gui/file_dialog.cpp
+    src/gui/shell_integration.cpp
     src/gui/theme.cpp
     src/gui/window_frame.cpp)
 
@@ -158,6 +164,9 @@ if(KOMPRESSOR_BUILD_GUI)
       MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
       MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
       MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/packaging/macos/Info.plist.in")
+    set(KZ_ICNS "${CMAKE_SOURCE_DIR}/packaging/icons/kompressor.icns")
+    target_sources(Kompressor PRIVATE ${KZ_ICNS})
+    set_source_files_properties(${KZ_ICNS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   elseif(WIN32)
     add_executable(Kompressor WIN32 ${KZ_GUI_SOURCES} packaging/windows/kompressor.rc)
     if(MSVC)

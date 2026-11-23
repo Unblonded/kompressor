@@ -1,5 +1,8 @@
 #include <winver.h>
 
+// GLFW looks this name up for the window class icon; Explorer uses the first icon for the exe.
+GLFW_ICON ICON "../icons/kompressor.ico"
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,0,0,0
  PRODUCTVERSION 1,0,0,0

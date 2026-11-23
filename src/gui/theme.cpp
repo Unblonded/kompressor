@@ -1,4 +1,5 @@
 #include "theme.hpp"
+#include "app_icon.hpp"
 
 #include <imgui_internal.h>
 
@@ -824,6 +825,13 @@ bool segmented(const char* id, int* v, const char* const* items, int count) {
 }
 
 void drawLogo(ImDrawList* dl, ImVec2 p, float s) {
+    // The real app icon; its tile is inset ~7.5% inside the image, so draw it a little larger.
+    float pad = s * 0.09f;
+    float fb = ImGui::GetIO().DisplayFramebufferScale.x;
+    if (ImTextureID tex = appIconTexture((s + pad * 2) * (fb > 0 ? fb : 1.0f))) {
+        dl->AddImage(tex, ImVec2(p.x - pad, p.y - pad), ImVec2(p.x + s + pad, p.y + s + pad));
+        return;
+    }
     ImVec2 b(p.x + s, p.y + s);
     gradientRect(dl, p, b, u32(col::Accent), u32(col::Accent2), s * 0.28f);
     gradientRect(dl, p, ImVec2(b.x, p.y + s * 0.5f), white(0.16f), white(0.0f), s * 0.28f);

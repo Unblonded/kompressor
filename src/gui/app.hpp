@@ -85,6 +85,10 @@ public:
     void onDrop(const std::vector<std::string>& paths);
     void openArchive(const std::string& path);
     void openCompressDialog(std::vector<std::string> inputs, bool super);
+    // Extracts an archive straight to `destDir` (Explorer "Extract here" / "Extract to folder").
+    void extractFile(const std::string& path, const std::string& destDir, const std::string& password = "");
+    // Close the window once every extractFile() job has succeeded (launches from the Explorer menu).
+    void quitWhenExtracted() { quitWhenExtracted_ = true; }
     bool busy() const;
     // Debug aid for --snapshot: navigate to and preview an entry once the active tab has loaded.
     void debugSelect(const std::string& entryPath) { debugSelect_ = entryPath; }
@@ -155,6 +159,9 @@ private:
     bool showAbout_ = false;
     bool showDemo_ = false;
     std::string lastDir_;
+    bool shellMenu_ = false;  // Explorer right-click menu installed
+    int directExtracts_ = 0;  // extractFile() jobs still running or waiting for a password
+    bool directFailed_ = false, quitWhenExtracted_ = false;
 
     struct CompressState {
         bool open = false, focus = false;

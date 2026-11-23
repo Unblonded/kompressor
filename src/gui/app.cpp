@@ -12,6 +12,7 @@
 #include "kmp.hpp"
 #include "app_util.hpp"
 #include "theme.hpp"
+#include "shell_integration.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -86,6 +87,48 @@ void reveal(const std::string& path) {
 #endif
 }
 
+std::string commonParent(const std::vector<std::string>& inputs) {
+    namespace fs = std::filesystem;
+    if (inputs.empty()) return {};
+    auto norm = [](const std::string& p) {
+        std::error_code ec;
+        std::string t = p;
+        while (t.size() > 1 && (t.back() == '/' || t.back() == '\\')) t.pop_back();
+        fs::path a = fs::absolute(kz::u8path(t), ec);
+        return (ec ? kz::u8path(t) : a).lexically_normal().parent_path();
+    };
+    auto same = [](const fs::path& x, const fs::path& y) {
+#ifdef _WIN32
+        return lower(kz::pathToUtf8(x)) == lower(kz::pathToUtf8(y));  // NTFS paths are case-insensitive
+#else
+        return x == y;
+#endif
+    };
+    std::vector<fs::path> common;
+    for (auto& part : norm(inputs[0])) common.push_back(part);
+    for (size_t i = 1; i < inputs.size(); ++i) {
+        std::vector<fs::path> parts;
+        for (auto& part : norm(inputs[i])) parts.push_back(part);
+        size_t k = 0;
+        while (k < common.size() && k < parts.size() && same(common[k], parts[k])) ++k;
+        common.resize(k);
+    }
+    fs::path r;
+    for (auto& part : common) r /= part;
+    // Nothing shared, or only a bare root name like "C:" (different drives / roots): use the first input's folder.
+    if (common.empty() || (common.size() == 1 && !r.has_root_directory())) return parentDir(inputs[0]);
+    return kz::pathToUtf8(r);
+}
+
+void retargetOutput(char* out, size_t n, const std::string& oldDir, const std::vector<std::string>& inputs) {
+    if (!out[0] || inputs.empty()) return;
+    std::string cur = out;
+    if (lower(kz::pathToUtf8(kz::u8path(parentDir(cur)).lexically_normal())) !=
+        lower(kz::pathToUtf8(kz::u8path(oldDir).lexically_normal())))
+        return;  // the user chose a folder themselves
+    copyTo(out, n, kz::pathToUtf8(kz::u8path(commonParent(inputs)) / kz::u8path(kz::fileNameOf(cur))));
+}
+
 int formatIndex(kz::OutFormat f) {
     auto& fs = kz::outputFormats();
     for (size_t i = 0; i < fs.size(); ++i)
@@ -98,6 +141,7 @@ int formatIndex(kz::OutFormat f) {
 App::App(GLFWwindow* window, ImFont* mono, float scale) : window_(window), mono_(mono), scale_(scale) {
     lastDir_ = FileDialog::homeDir();
     fileDlg_.setParent(window);
+    shellMenu_ = shell::registered();
     log(col::Dim, std::string("Kompressor ") + KZ_VERSION + " ready. Drop files or archives onto the window.");
 }
 
@@ -439,7 +483,9 @@ void App::actionOpen() {
 
 void App::onDrop(const std::vector<std::string>& paths) {
     if (cmp_.open) {
+        std::string oldDir = commonParent(cmp_.inputs);
         for (auto& p : paths) cmp_.inputs.push_back(p);
+        retargetOutput(cmp_.out, sizeof cmp_.out, oldDir, cmp_.inputs);
         return;
     }
     bool allArchives = true;
@@ -477,7 +523,7 @@ void App::openCompressDialog(std::vector<std::string> inputs, bool super) {
             if (!e.empty()) base = base.substr(0, base.size() - e.size() - 1);
         }
         copyTo(cmp_.out, sizeof cmp_.out,
-               kz::pathToUtf8(kz::u8path(parentDir(first)) / kz::u8path(base + fd.ext)));
+               kz::pathToUtf8(kz::u8path(commonParent(cmp_.inputs)) / kz::u8path(base + fd.ext)));
     }
 }
 
@@ -521,6 +567,38 @@ void App::runExtract(int tabId, kz::ExtractOptions o, bool doReveal) {
                                 runExtract(tabId, o2, doReveal);
                             });
             } else {
+                log(col::Error, "Extract failed (" + title + "): " + j.message, "", o.destDir);
+                toast(col::Error, "Extraction failed: " + j.message);
+            }
+        });
+}
+
+void App::extractFile(const std::string& path, const std::string& destDir, const std::string& password) {
+    kz::Source src;
+    src.path = path;
+    std::string title = src.name();
+    kz::ExtractOptions o;
+    o.destDir = destDir;
+    o.password = password;
+    ++directExtracts_;
+    startJob("Extracting " + title,
+        [src, o](kz::Progress& p, std::string& err) { return kz::extractArchive(src, o, p, err); },
+        [this, path, o, title](Job& j) {
+            --directExtracts_;
+            for (auto& w : j.prog->warnings()) log(col::Warn, w);
+            if (j.ok) {
+                log(col::Ok, "Extracted " + title + " to " + o.destDir, "", o.destDir);
+                toast(col::Ok, "Extracted " + title);
+            } else if (j.prog->needPassword) {
+                ++directExtracts_;  // still pending until the password prompt is answered
+                askPassword(o.password.empty() ? "\"" + title + "\" is encrypted. Enter its password:"
+                                               : "Wrong password for \"" + title + "\". Try again:",
+                            [this, path, o](const std::string& pw) {
+                                --directExtracts_;
+                                extractFile(path, o.destDir, pw);
+                            });
+            } else {
+                directFailed_ = true;
                 log(col::Error, "Extract failed (" + title + "): " + j.message, "", o.destDir);
                 toast(col::Error, "Extraction failed: " + j.message);
             }

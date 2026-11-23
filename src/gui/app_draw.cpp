@@ -12,6 +12,7 @@
 #include "app_util.hpp"
 #include "kmp.hpp"
 #include "theme.hpp"
+#include "shell_integration.hpp"
 #include "window_frame.hpp"
 
 namespace kzgui {
@@ -181,6 +182,7 @@ const char* kMod = "Ctrl";
 // ============================================================================ frame
 void App::frame() {
     pumpJobs();
+    if (quitWhenExtracted_ && directExtracts_ == 0 && !directFailed_) glfwSetWindowShouldClose(window_, 1);
     const float em = emPx();
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -329,6 +331,19 @@ void App::drawMenuBar() {
         if (ImGui::MenuItem("Super Compress...", kSN.c_str())) openCompressDialog({}, true);
         ImGui::Separator();
         if (ImGui::MenuItem("Close Tab", kW.c_str(), false, at != nullptr)) closeTab(activeTab_);
+        ImGui::Separator();
+        if (shell::supported() && ImGui::MenuItem("Explorer Right-Click Menu", nullptr, shellMenu_)) {
+            std::string err;
+            if (shellMenu_ ? shell::unregisterMenu(err) : shell::registerMenu(err)) {
+                shellMenu_ = !shellMenu_;
+                log(col::Dim, shellMenu_ ? "Added Kompressor to the Explorer right-click menu."
+                                         : "Removed Kompressor from the Explorer right-click menu.");
+                toast(col::Ok, shellMenu_ ? "Added to the right-click menu" : "Removed from the right-click menu");
+            } else {
+                log(col::Error, "Explorer menu: " + err);
+                toast(col::Error, "Could not change the right-click menu");
+            }
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("Quit")) glfwSetWindowShouldClose(window_, 1);
         ImGui::EndMenu();
@@ -903,7 +918,7 @@ void App::drawTable(ExplorerTab& t, float width) {
     ImGuiIO& io = ImGui::GetIO();
     bool searching = t.filter[0] != 0;
     ImGuiListClipper clip;
-    clip.Begin((int)t.rows.size(), rowH);
+    clip.Begin((int)t.rows.size());  // let the clipper measure real row height (with spacing) so every row is reachable
     while (clip.Step()) {
         for (int r = clip.DisplayStart; r < clip.DisplayEnd; ++r) {
             int id = t.rows[r];
@@ -941,7 +956,10 @@ void App::drawTable(ExplorerTab& t, float width) {
                 ImVec2 ra(tb->WorkRect.Min.x + em * 0.35f, ImGui::GetItemRectMin().y + 1),
                     rb(tb->WorkRect.Max.x - em * 0.35f, ImGui::GetItemRectMax().y - 1);
                 ImDrawList* dl = ImGui::GetWindowDrawList();
-                dl->PushClipRect(ImVec2(tb->InnerClipRect.Min.x, ra.y), ImVec2(tb->InnerClipRect.Max.x, rb.y), false);
+                // Escape the column clip (the highlight spans all columns) but stay inside the scrolling body:
+                // never over the frozen header row or past the bottom of the list.
+                const ImRect& body = tb->Bg2ClipRectForDrawCmd;
+                dl->PushClipRect(body.Min, body.Max, false);
                 if (sel) {
                     dl->AddRectFilled(ra, rb, u32(col::Accent, 0.20f), em * 0.45f);
                     dl->AddRect(ra, rb, u32(col::Accent, 0.35f), em * 0.45f);
@@ -1372,17 +1390,20 @@ void App::drawActivity() {
     for (size_t i = 0; i < log_.size(); ++i) {
         auto& l = log_[i];
         ImGui::PushID((int)i);
-        ImGui::PushFont(fonts().caption);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(col::Faint, "%s", clockTime(l.time).c_str());
-        ImGui::PopFont();
-        ImGui::SameLine(0, em * 0.7f);
+        // Lay the row out by hand so the small timestamp, the icon and the message share one centre line.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float L = ImGui::GetTextLineHeight();
+        ImFont* cf = fonts().caption;
+        float cs = cf->FontSize * ImGui::GetIO().FontGlobalScale;
+        std::string ts = clockTime(l.time);
+        ImVec2 tsz = cf->CalcTextSizeA(cs, FLT_MAX, 0, ts.c_str());
+        float timeW = cf->CalcTextSizeA(cs, FLT_MAX, 0, "00:00:00").x;
+        dl->AddText(cf, cs, ImVec2(p.x, std::floor(p.y + (L - tsz.y) * 0.5f)), u32(col::Faint), ts.c_str());
         float is = em * 0.95f;
-        ImVec2 cp = ImGui::GetCursorScreenPos();
-        drawIco(ImGui::GetWindowDrawList(), logIcon(l.color), ImVec2(cp.x, cp.y + (ImGui::GetTextLineHeight() - is) * 0.5f + 1), is,
-                u32(l.color));
-        ImGui::Dummy(ImVec2(is, ImGui::GetTextLineHeight()));
-        ImGui::SameLine(0, em * 0.5f);
+        float x = p.x + timeW + em * 0.8f;
+        drawIco(dl, logIcon(l.color), ImVec2(x, std::floor(p.y + (L - is) * 0.5f)), is, u32(l.color));
+        ImGui::SetCursorScreenPos(ImVec2(x + is + em * 0.55f, p.y));
         bool plain = l.color.x == col::Dim.x && l.color.y == col::Dim.y;
         ImGui::TextColored(plain ? col::Dim : mix(l.color, col::Text, 0.55f), "%s", l.text.c_str());
         if (!l.openPath.empty()) {
@@ -1477,14 +1498,20 @@ void App::drawCompressWindow() {
             ImGui::Dummy(ImVec2(0, 0));
             ImGui::PopID();
         }
-        if (remove >= 0) cmp_.inputs.erase(cmp_.inputs.begin() + remove);
+        if (remove >= 0) {
+            std::string oldDir = commonParent(cmp_.inputs);
+            cmp_.inputs.erase(cmp_.inputs.begin() + remove);
+            retargetOutput(cmp_.out, sizeof cmp_.out, oldDir, cmp_.inputs);
+        }
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
     }
     {
         auto addPicked = [this](const std::vector<std::string>& p) {
             bool wasEmpty = cmp_.inputs.empty() && cmp_.out[0] == 0;
+            std::string oldDir = commonParent(cmp_.inputs);
             for (auto& x : p) cmp_.inputs.push_back(x);
+            if (!wasEmpty) retargetOutput(cmp_.out, sizeof cmp_.out, oldDir, cmp_.inputs);
             if (wasEmpty) {
                 int f = cmp_.format, k = cmp_.kmpMode;
                 openCompressDialog(cmp_.inputs, false);
@@ -1612,6 +1639,20 @@ void App::drawCompressWindow() {
                           copyTo(cmp_.out, sizeof cmp_.out, o);
                       },
                       cur.empty() ? std::string("Archive") + fd.ext : kz::fileNameOf(cur));
+    }
+    if (cmp_.out[0]) {
+        // Long paths get cut off in the field: show where it actually lands (".../folder/name.ext").
+        std::filesystem::path op = kz::u8path(cmp_.out);
+        std::string folder = kz::pathToUtf8(op.parent_path().filename());
+        std::string tail = (folder.empty() ? std::string() : "..." + std::string(1, (char)std::filesystem::path::preferred_separator) + folder +
+                                                                 std::string(1, (char)std::filesystem::path::preferred_separator)) +
+                           kz::pathToUtf8(op.filename());
+        icon(Ico::FolderOpen, em * 0.9f, col::FolderCol);
+        ImGui::SameLine(0, em * 0.4f);
+        ImGui::PushFont(fonts().caption);
+        ImGui::TextColored(col::Dim, "%s", tail.c_str());
+        ImGui::PopFont();
+        ImGui::SetItemTooltip("%s", cmp_.out);
     }
     toggle("Open the archive when finished", &cmp_.openWhenDone);
 

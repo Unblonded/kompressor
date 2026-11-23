@@ -22,6 +22,8 @@
 #include <vector>
 
 #include "app.hpp"
+#include "app_icon.hpp"
+#include "shell_integration.hpp"
 #include "kmp.hpp"
 #include "kz_archive.hpp"
 #include "theme.hpp"
@@ -148,6 +150,25 @@ int main(int argc, char** argv) {
             break;
         }
 
+    // Explorer menu maintenance: "--register-shell" / "--unregister-shell".
+    for (size_t i = 1; i < args.size(); ++i)
+        if (args[i] == "--register-shell" || args[i] == "--unregister-shell") {
+            std::string err;
+            bool ok = args[i] == "--register-shell" ? kzgui::shell::registerMenu(err) : kzgui::shell::unregisterMenu(err);
+            if (!ok) std::fprintf(stderr, "kompressor: %s\n", err.c_str());
+            return ok ? 0 : 1;
+        }
+    // Launched from the Explorer menu: "--shell <action> <path>". Explorer starts one process per selected
+    // item; the first one collects the rest and the others exit right here.
+    std::string shellAction;
+    std::vector<std::string> shellPaths;
+    if (args.size() >= 3 && args[1] == "--shell") {
+        shellAction = args[2];
+        shellPaths.assign(args.begin() + 3, args.end());
+        args.resize(1);
+        if (!kzgui::shell::collectShellLaunch(shellAction, shellPaths)) return 0;
+    }
+
     glfwSetErrorCallback(onError);
 #if defined(__linux__) && GLFW_VERSION_MINOR >= 4
     glfwInitHint(GLFW_PLATFORM, GLFW_ANY_PLATFORM);
@@ -176,6 +197,7 @@ int main(int argc, char** argv) {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
     glfwSetWindowSizeLimits(window, 760, 480, GLFW_DONT_CARE, GLFW_DONT_CARE);
+    kzgui::setWindowIcon(window);
     kzgui::frame::install(window);  // custom title bar (Windows)
 
     IMGUI_CHECKVERSION();
@@ -215,6 +237,24 @@ int main(int argc, char** argv) {
                 toCompress.push_back(args[i]);
         }
         if (!toCompress.empty()) app.openCompressDialog(toCompress, false);
+
+        if (!shellPaths.empty()) {
+            namespace fs = std::filesystem;
+            if (shellAction == "compress" || shellAction == "super") {
+                app.openCompressDialog(shellPaths, shellAction == "super");
+            } else if (shellAction == "open") {
+                for (auto& p : shellPaths) app.openArchive(p);
+            } else if (shellAction == "extract-here" || shellAction == "extract-to") {
+                for (auto& p : shellPaths) {
+                    fs::path dir = kz::u8path(p).parent_path();
+                    if (shellAction == "extract-to") dir /= kz::u8path(kz::stripArchiveExt(kz::fileNameOf(p)));
+                    app.extractFile(p, kz::pathToUtf8(dir));
+                }
+                app.quitWhenExtracted();
+            }
+        } else if (snapshotPath.empty()) {
+            kzgui::shell::autoRegister();  // put Kompressor in the right-click menu unless the user turned it off
+        }
 
         // One UI frame. Called from the main loop and from the window-refresh callback: while the user
         // drags or resizes the window, Windows runs its own modal loop and our loop is paused, so
