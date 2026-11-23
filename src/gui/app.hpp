@@ -66,11 +66,11 @@ struct ExplorerTab {
     std::string previewError;
     std::shared_ptr<kz::Progress> previewProg;
     int previewMode = 0;  // 0 auto, 1 text, 2 hex
-    float previewWidth = 0.0f;
+    float previewWidth = 0.0f;  // fraction of the explorer width
 };
 
 struct LogEntry {
-    double time;
+    double time;  // wall-clock seconds (time_t)
     ImVec4 color;
     std::string text;
     std::string openPath;  // optional: "Open" button opens this archive
@@ -121,6 +121,7 @@ private:
     void drawPasswordPopup();
     void drawAbout();
     void drawToasts();
+    void drawStatusBar();
 
     // actions
     void actionOpen();

@@ -14,6 +14,7 @@
 #include <GL/gl.h>
 #endif
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -23,6 +24,7 @@
 #include "kmp.hpp"
 #include "kz_archive.hpp"
 #include "theme.hpp"
+#include "window_frame.hpp"
 
 namespace {
 
@@ -54,10 +56,14 @@ ImFont* loadFonts(float px, ImFont** monoOut) {
     };
 #if defined(_WIN32)
     std::string ui = firstExisting({"C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"});
-    std::string mono = firstExisting({"C:\\Windows\\Fonts\\consola.ttf", "C:\\Windows\\Fonts\\cour.ttf"});
+    std::string bold = firstExisting({"C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf",
+                                      "C:\\Windows\\Fonts\\arialbd.ttf"});
+    std::string mono = firstExisting({"C:\\Windows\\Fonts\\CascadiaMono.ttf", "C:\\Windows\\Fonts\\consola.ttf",
+                                      "C:\\Windows\\Fonts\\cour.ttf"});
 #elif defined(__APPLE__)
     std::string ui = firstExisting({"/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "/Library/Fonts/Arial Unicode.ttf",
                                     "/System/Library/Fonts/Supplemental/Arial.ttf"});
+    std::string bold = firstExisting({"/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/Library/Fonts/Arial Bold.ttf"});
     std::string mono = firstExisting({"/System/Library/Fonts/Menlo.ttc", "/System/Library/Fonts/Monaco.ttf"});
 #else
     std::string ui = firstExisting({"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -65,26 +71,62 @@ ImFont* loadFonts(float px, ImFont** monoOut) {
                                     "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
                                     "/usr/share/fonts/noto/NotoSans-Regular.ttf",
                                     "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf"});
+    std::string bold = firstExisting({"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+                                      "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+                                      "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+                                      "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+                                      "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf"});
     std::string mono = firstExisting({"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
                                       "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
                                       "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
                                       "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"});
 #endif
+    if (bold.empty()) bold = ui;
     ImFontConfig cfg;
     cfg.OversampleH = 2;
     cfg.OversampleV = 2;
-    ImFont* main = nullptr;
-    if (!ui.empty()) main = io.Fonts->AddFontFromFileTTF(ui.c_str(), px, &cfg, ranges);
-    if (!main) {
-        ImFontConfig d;
-        d.SizePixels = px;
-        main = io.Fonts->AddFontDefault(&d);
-    }
-    *monoOut = mono.empty() ? nullptr : io.Fonts->AddFontFromFileTTF(mono.c_str(), px * 0.95f, &cfg, ranges);
-    return main;
+    auto add = [&](const std::string& file, float size) -> ImFont* {
+        ImFont* f = file.empty() ? nullptr : io.Fonts->AddFontFromFileTTF(file.c_str(), size, &cfg, ranges);
+        if (!f) {
+            ImFontConfig d;
+            d.SizePixels = size;
+            f = io.Fonts->AddFontDefault(&d);
+        }
+        return f;
+    };
+    kzgui::Fonts& F = kzgui::fonts();
+    F.body = add(ui, px);  // first font added = default
+    F.bold = add(bold, px);
+    F.caption = add(ui, std::round(px * 0.85f));
+    F.h2 = add(bold, std::round(px * 1.3f));
+    F.h1 = add(bold, std::round(px * 2.3f));
+    F.mono = mono.empty() ? F.body : add(mono, std::round(px * 0.93f));
+    *monoOut = F.mono;
+    return F.body;
 }
 
 }  // namespace
+
+float g_pendingScale = 0.0f;  // set by the content-scale callback, applied before the next frame
+float g_currentScale = 0.0f;
+
+// (Re)builds fonts and style for a monitor content scale. Returns the style scale.
+float applyUiScale(float xs, ImFont** mono) {
+    if (xs <= 0.0f) xs = 1.0f;
+    g_currentScale = xs;
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+    const float basePx = 15.0f;
+    io.FontDefault = loadFonts(basePx * xs, mono);
+#if defined(__APPLE__)
+    io.FontGlobalScale = 1.0f / xs;  // fonts are rasterised at framebuffer resolution, laid out in points
+    float uiScale = 1.0f;
+#else
+    float uiScale = xs;
+#endif
+    kzgui::applyTheme(uiScale);
+    return uiScale;
+}
 
 int main(int argc, char** argv) {
     kz::initLocale();
@@ -132,6 +174,7 @@ int main(int argc, char** argv) {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
     glfwSetWindowSizeLimits(window, 760, 480, GLFW_DONT_CARE, GLFW_DONT_CARE);
+    kzgui::frame::install(window);  // custom title bar (Windows)
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -140,23 +183,16 @@ int main(int argc, char** argv) {
     io.IniFilename = nullptr;  // layout is fixed; nothing worth persisting
 
     // HiDPI: macOS works in points with a 2x framebuffer; Windows/Linux work in pixels.
+    // The scale follows the monitor the window is on (e.g. 100% on a 1080p screen, 175% on 4K):
+    // fonts and sizes are rebuilt whenever the window moves to a monitor with a different scale.
     float xs = 1.0f, ys = 1.0f;
     glfwGetWindowContentScale(window, &xs, &ys);
-    const float basePx = 15.0f;
     ImFont* mono = nullptr;
-#if defined(__APPLE__)
-    ImFont* uiFont = loadFonts(basePx * xs, &mono);
-    io.FontGlobalScale = 1.0f / xs;
-    float uiScale = 1.0f;
-#else
-    ImFont* uiFont = loadFonts(basePx * xs, &mono);
-    float uiScale = xs;
-#endif
-    io.FontDefault = uiFont;
-    kzgui::applyTheme(uiScale);
+    float uiScale = applyUiScale(xs, &mono);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl);
+    glfwSetWindowContentScaleCallback(window, [](GLFWwindow*, float x, float) { g_pendingScale = x; });
 
     {
         kzgui::App app(window, mono, uiScale);
@@ -183,15 +219,25 @@ int main(int argc, char** argv) {
             if (app.busy()) glfwWaitEventsTimeout(1.0 / 30.0);
             else glfwWaitEventsTimeout(0.5);
 
+            if (g_pendingScale > 0.0f) {
+                float ns = g_pendingScale;
+                g_pendingScale = 0.0f;
+                if (std::fabs(ns - g_currentScale) > 0.01f) {
+                    ImGui_ImplOpenGL3_DestroyFontsTexture();
+                    applyUiScale(ns, &mono);
+                    ImGui_ImplOpenGL3_CreateFontsTexture();
+                }
+            }
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
+            kzgui::beginFrameUi();
             app.frame();
             ImGui::Render();
             int w, h;
             glfwGetFramebufferSize(window, &w, &h);
             glViewport(0, 0, w, h);
-            glClearColor(0.067f, 0.071f, 0.090f, 1.0f);
+            glClearColor(0.055f, 0.059f, 0.075f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             if (!snapshotPath.empty() && ImGui::GetTime() > 3.0) {

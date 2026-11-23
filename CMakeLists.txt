@@ -117,7 +117,14 @@ if(KOMPRESSOR_BUILD_GUI)
   FetchContent_Declare(imgui
     URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b.tar.gz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-  FetchContent_MakeAvailable(glfw imgui)
+  # Native OS file dialogs: Windows IFileDialog, macOS NSOpenPanel, Linux xdg-desktop-portal (D-Bus).
+  set(NFD_PORTAL ON CACHE BOOL "" FORCE)
+  set(NFD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(NFD_INSTALL OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(nfd
+    URL https://github.com/btzy/nativefiledialog-extended/archive/refs/tags/v1.2.1.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  FetchContent_MakeAvailable(glfw imgui nfd)
 
   find_package(OpenGL REQUIRED)
 
@@ -138,8 +145,10 @@ if(KOMPRESSOR_BUILD_GUI)
   set(KZ_GUI_SOURCES
     src/gui/main.cpp
     src/gui/app.cpp
+    src/gui/app_draw.cpp
     src/gui/file_dialog.cpp
-    src/gui/theme.cpp)
+    src/gui/theme.cpp
+    src/gui/window_frame.cpp)
 
   if(APPLE)
     add_executable(Kompressor MACOSX_BUNDLE ${KZ_GUI_SOURCES})
@@ -155,10 +164,11 @@ if(KOMPRESSOR_BUILD_GUI)
       # The .rc embeds our own manifest (DPI awareness, UTF-8 code page, long paths).
       target_link_options(Kompressor PRIVATE /ENTRY:mainCRTStartup /MANIFEST:NO)
     endif()
+    target_link_libraries(Kompressor PRIVATE dwmapi)  # custom title bar: shadow, dark/rounded frame
   else()
     add_executable(Kompressor ${KZ_GUI_SOURCES})
   endif()
-  target_link_libraries(Kompressor PRIVATE kompressor_core imgui)
+  target_link_libraries(Kompressor PRIVATE kompressor_core imgui nfd)
 endif()
 
 if(KOMPRESSOR_BUILD_CLI)
