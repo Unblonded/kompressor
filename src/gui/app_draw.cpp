@@ -187,6 +187,7 @@ void App::frame() {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::SetNextWindowViewport(vp->ID);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -276,12 +277,14 @@ void App::frame() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_N, ImGuiInputFlags_RouteGlobal)) openCompressDialog({}, false);
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_N, ImGuiInputFlags_RouteGlobal)) openCompressDialog({}, true);
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_W, ImGuiInputFlags_RouteGlobal) && activeTab_ >= 0) closeTab(activeTab_);
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Comma, ImGuiInputFlags_RouteGlobal)) showSettings_ = true;
 
     drawCompressWindow();
     drawExtractWindow();
     drawConvertWindow();
     drawFormats();
     drawAbout();
+    drawSettings();
     drawPasswordPopup();
     fileDlg_.draw();
     if (std::string e = fileDlg_.takeError(); !e.empty()) {
@@ -317,7 +320,7 @@ void App::drawMenuBar() {
     ImGui::PopFont();
     ImGui::SameLine(0, em * 1.4f);
 
-    std::string kO = std::string(kMod) + "+O", kN = std::string(kMod) + "+N", kSN = std::string(kMod) + "+Shift+N",
+    std::string kO = std::string(kMod) + "+O", kN = std::string(kMod) + "+N", kSN = std::string(kMod) + "+Shift+N", kSet = std::string(kMod) + "+,",
                 kW = std::string(kMod) + "+W";
     ExplorerTab* at = tabById(activeTab_);
     bool ready = at && !at->loading && !at->nodes.empty();
@@ -332,18 +335,7 @@ void App::drawMenuBar() {
         ImGui::Separator();
         if (ImGui::MenuItem("Close Tab", kW.c_str(), false, at != nullptr)) closeTab(activeTab_);
         ImGui::Separator();
-        if (shell::supported() && ImGui::MenuItem("Explorer Right-Click Menu", nullptr, shellMenu_)) {
-            std::string err;
-            if (shellMenu_ ? shell::unregisterMenu(err) : shell::registerMenu(err)) {
-                shellMenu_ = !shellMenu_;
-                log(col::Dim, shellMenu_ ? "Added Kompressor to the Explorer right-click menu."
-                                         : "Removed Kompressor from the Explorer right-click menu.");
-                toast(col::Ok, shellMenu_ ? "Added to the right-click menu" : "Removed from the right-click menu");
-            } else {
-                log(col::Error, "Explorer menu: " + err);
-                toast(col::Error, "Could not change the right-click menu");
-            }
-        }
+        if (ImGui::MenuItem("Settings...", kSet.c_str())) showSettings_ = true;
         ImGui::Separator();
         if (ImGui::MenuItem("Quit")) glfwSetWindowShouldClose(window_, 1);
         ImGui::EndMenu();
@@ -484,8 +476,10 @@ void App::drawToolbar() {
         ImGui::SetItemTooltip("Re-pack this archive into Kompressor's super format (no temp files)");
     }
 
-    // right: activity toggle
+    // right: settings + activity toggle
     float is = em * 2.2f;
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + W - is * 2 - em * 1.4f, p0.y + (h - is) * 0.5f));
+    if (iconButton("##settings", Ico::Gear, is, "Settings")) showSettings_ = true;
     ImGui::SetCursorScreenPos(ImVec2(p0.x + W - is - em * 1.0f, p0.y + (h - is) * 0.5f));
     const ImVec4 on = col::AccentHover;
     if (iconButton("##activity", Ico::Panel, is, showActivity_ ? "Hide activity panel" : "Show activity panel", true,
@@ -1951,6 +1945,49 @@ void App::drawAbout() {
     endDialog();
 }
 
+void App::drawSettings() {
+    if (!showSettings_) return;
+    const float em = emPx();
+    if (!beginDialog("###settings", "Settings", "Preferences for this computer", Ico::Gear, &showSettings_, em * 32,
+                     col::Accent)) {
+        endDialog();
+        return;
+    }
+    if (debugDetach_) {
+        debugDetach_ = false;
+        ImGuiViewport* mv = ImGui::GetMainViewport();
+        ImGui::SetWindowPos(ImVec2(mv->Pos.x + mv->Size.x + em * 2, mv->Pos.y + em * 4));
+    }
+    if (shell::supported()) {
+        caption("INTEGRATION");
+        if (ImGui::IsWindowAppearing()) shellMenu_ = shell::registered();  // the installer may have changed it
+        bool on = shellMenu_;
+        if (toggle("Show Kompressor in the Explorer right-click menu", &on)) {
+            std::string err;
+            if (on ? shell::registerMenu(err) : shell::unregisterMenu(err)) {
+                shellMenu_ = on;
+                log(col::Dim, on ? "Added Kompressor to the Explorer right-click menu."
+                                 : "Removed Kompressor from the Explorer right-click menu.");
+                toast(col::Ok, on ? "Added to the right-click menu" : "Removed from the right-click menu");
+            } else {
+                log(col::Error, "Explorer menu: " + err);
+                toast(col::Error, "Could not change the right-click menu");
+            }
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, col::Dim);
+        ImGui::TextWrapped("Adds a Kompressor submenu to files and folders: compress, super compress, and for "
+                           "archives open and extract. On Windows 11 it sits under \"Show more options\".");
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, em * 0.6f));
+    }
+    caption("INTERFACE");
+    toggle("Show the activity panel", &showActivity_);
+    ImGui::Dummy(ImVec2(0, em * 0.4f));
+    alignRight(em * 6);
+    if (secondaryButton("Done", ImVec2(em * 6, 0))) showSettings_ = false;
+    endDialog();
+}
+
 void App::drawToasts() {
     const float em = emPx();
     double now = ImGui::GetTime();
@@ -1963,6 +2000,7 @@ void App::drawToasts() {
         float alpha = age > 4.4f ? (5.0f - age) / 0.6f : std::min(1.0f, age * 5.0f);
         float slide = (1.0f - std::min(1.0f, age * 5.0f)) * em * 2.0f;
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - em * 1.2f + slide, y), ImGuiCond_Always, ImVec2(1, 1));
+        ImGui::SetNextWindowViewport(vp->ID);
         std::string name = "##toast" + std::to_string(i);
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::max(0.0f, alpha));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(em * 1.1f, em * 0.8f));

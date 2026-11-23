@@ -89,6 +89,9 @@ public:
     void extractFile(const std::string& path, const std::string& destDir, const std::string& password = "");
     // Close the window once every extractFile() job has succeeded (launches from the Explorer menu).
     void quitWhenExtracted() { quitWhenExtracted_ = true; }
+    void showSettings() { showSettings_ = true; }
+    // Debug aid: place the Settings dialog beside the main window (tests detached viewports).
+    void debugDetach() { debugDetach_ = true; }
     bool busy() const;
     // Debug aid for --snapshot: navigate to and preview an entry once the active tab has loaded.
     void debugSelect(const std::string& entryPath) { debugSelect_ = entryPath; }
@@ -124,6 +127,7 @@ private:
     void drawConvertWindow();
     void drawPasswordPopup();
     void drawAbout();
+    void drawSettings();
     void drawToasts();
     void drawStatusBar();
 
@@ -157,6 +161,8 @@ private:
     std::vector<Toast> toasts_;
     bool showActivity_ = true;
     bool showAbout_ = false;
+    bool showSettings_ = false;
+    bool debugDetach_ = false;
     bool showDemo_ = false;
     std::string lastDir_;
     bool shellMenu_ = false;  // Explorer right-click menu installed

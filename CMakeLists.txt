@@ -118,9 +118,10 @@ if(KOMPRESSOR_BUILD_GUI)
   FetchContent_Declare(glfw
     URL https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  # The docking branch release: adds multi-viewports (dialogs can be dragged out into their own OS windows).
   FetchContent_Declare(imgui
-    URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP FALSE)  # fresh timestamps, so switching versions rebuilds the library
   # Native OS file dialogs: Windows IFileDialog, macOS NSOpenPanel, Linux xdg-desktop-portal (D-Bus).
   set(NFD_PORTAL ON CACHE BOOL "" FORCE)
   set(NFD_BUILD_TESTS OFF CACHE BOOL "" FORCE)

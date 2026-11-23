@@ -22,12 +22,21 @@ jobs:
         run: |
           ./build/windows/kompressor-cli.exe super t.kmp src -m fast
           ./build/windows/kompressor-cli.exe test t.kmp
+      - name: Installer
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          ./packaging/windows/build_installer.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: Kompressor-windows-x64
           path: |
             build/windows/Kompressor.exe
             build/windows/kompressor-cli.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kompressor-windows-setup
+          path: build/windows/installer/KompressorSetup-*.exe
 
   macos-universal:
     runs-on: macos-15

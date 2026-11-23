@@ -118,4 +118,21 @@ void setTitleBar(float height, const std::vector<Rect>& interactive) {
     g_interactive = interactive;
 }
 
+void styleDetached(void* nativeHandle) {
+#ifdef _WIN32
+    HWND h = static_cast<HWND>(nativeHandle);
+    if (!h) return;
+    if (g_window)  // owned windows stay above the main window and minimize with it
+        SetWindowLongPtrW(h, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(glfwGetWin32Window(g_window)));
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(h, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
+    int corner = 2 /* DWMWCP_ROUND */;
+    DwmSetWindowAttribute(h, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corner, sizeof corner);
+    MARGINS m{1, 1, 1, 1};  // gives the borderless popup the standard drop shadow
+    DwmExtendFrameIntoClientArea(h, &m);
+#else
+    (void)nativeHandle;
+#endif
+}
+
 }  // namespace kzgui::frame

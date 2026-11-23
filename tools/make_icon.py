@@ -7,6 +7,7 @@ the copy compiled into the app. Only needs Pillow; drawn at 2x and downsampled f
 """
 import lzma
 import os
+import struct
 import sys
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -105,6 +106,18 @@ def write_embed(icon, path):
     print("wrote", os.path.abspath(path), f"({len(blob)} bytes compressed)")
 
 
+def write_bmp32(im, path):
+    """32-bit BGRA bottom-up BMP that keeps the alpha channel (Pillow would drop it)."""
+    im = im.convert("RGBA")
+    w, h = im.size
+    rows = [im.crop((0, y, w, y + 1)).tobytes("raw", "BGRA") for y in range(h - 1, -1, -1)]
+    pixels = b"".join(rows)
+    info = struct.pack("<IiiHHIIiiII", 40, w, h, 1, 32, 0, len(pixels), 2835, 2835, 0, 0)
+    header = struct.pack("<2sIHHI", b"BM", 14 + len(info) + len(pixels), 0, 0, 14 + len(info))
+    with open(path, "wb") as f:
+        f.write(header + info + pixels)
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "packaging", "icons")
@@ -121,6 +134,10 @@ def main():
     print("wrote", os.path.abspath(out))
     if len(sys.argv) <= 1:
         write_embed(icon, os.path.join(here, "..", "src", "gui", "app_icon_data.inc"))
+        # Inno Setup wizard header images, one per DPI step (32-bit BMP with alpha).
+        win = os.path.join(here, "..", "packaging", "windows")
+        for px in (55, 69, 83, 110, 138):
+            write_bmp32(small(icon, px), os.path.join(win, f"wizard_small_{px}.bmp"))
 
 
 if __name__ == "__main__":

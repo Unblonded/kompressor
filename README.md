@@ -66,6 +66,19 @@ cmake --preset windows && cmake --build --preset windows
 ```
 The output is `build/windows/Kompressor.exe`, which has no DLL dependencies. The `windows-arm64` preset builds for ARM64.
 
+To build the installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`) and run:
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\windows\build_installer.ps1
+```
+It writes `build/windows/installer/KompressorSetup-<version>.exe`. The installer:
+- installs per user, with no admin prompt
+- adds a Start menu shortcut
+- can add the Explorer right-click menu (on by default)
+- can add a desktop shortcut and put `kompressor-cli` on `PATH` (both off by default)
+- registers an uninstaller in Apps & Features
+
+The right-click menu can also be switched on or off later in the app's **Settings** (gear button, or Ctrl+,).
+
 ### Linux (Debian/Ubuntu)
 ```bash
 sudo apt install cmake ninja-build g++ libarchive-dev liblzma-dev libzstd-dev libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxkbcommon-dev

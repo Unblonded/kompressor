@@ -352,6 +352,21 @@ void drawIco(ImDrawList* dl, Ico ic, ImVec2 p, float s, ImU32 c) {
             dl->AddCircle(P(0.5f, 0.5f), s * 0.40f, c, 24, t);
             dl->AddPolyline(std::array<ImVec2, 3>{P(0.50f, 0.26f), P(0.50f, 0.52f), P(0.68f, 0.62f)}.data(), 3, c, 0, t);
             break;
+        case Ico::Gear: {
+            const int teeth = 8;
+            const float ro = 0.44f, ri = 0.33f;
+            for (int i = 0; i < teeth; ++i) {
+                float a = i * 6.2831853f / teeth, w = 0.22f;
+                ImVec2 q[4] = {P(0.5f + std::cos(a - w) * ri, 0.5f + std::sin(a - w) * ri),
+                               P(0.5f + std::cos(a - w * 0.62f) * ro, 0.5f + std::sin(a - w * 0.62f) * ro),
+                               P(0.5f + std::cos(a + w * 0.62f) * ro, 0.5f + std::sin(a + w * 0.62f) * ro),
+                               P(0.5f + std::cos(a + w) * ri, 0.5f + std::sin(a + w) * ri)};
+                dl->AddConvexPolyFilled(q, 4, c);
+            }
+            dl->AddCircle(P(0.5f, 0.5f), s * (ri - 0.02f) - t * 0.5f, c, 28, t * 1.5f);
+            dl->AddCircle(P(0.5f, 0.5f), s * 0.11f, c, 16, t);
+            break;
+        }
         case Ico::Layers:
             for (int i = 2; i >= 0; --i) {
                 float y = 0.20f + i * 0.17f;
@@ -670,14 +685,19 @@ bool beginDialog(const char* id, const char* title, const char* subtitle, Ico ic
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0), ImVec2(width, vp->WorkSize.y * 0.94f));
+    // A dialog dragged out into its own OS window lets the OS draw the rounded corners and shadow;
+    // ImGui's own rounding would leave unpainted corners there.
+    ImGuiWindow* prev = ImGui::FindWindowByName(id);
+    bool detached = prev && prev->Viewport && prev->Viewport != ImGui::GetMainViewport();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(e * 1.5f, e * 1.3f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, detached ? 0.0f : ImGui::GetStyle().WindowRounding);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.075f, 0.078f, 0.102f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_Border, mix(col::Line, col::Faint, 0.3f));
     bool vis = ImGui::Begin(id, open,
                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
-                                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
+                                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoDocking);
     ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - e * 3.0f);  // popped by endDialog
     if (!vis) return false;
     ImDrawList* dl = ImGui::GetWindowDrawList();

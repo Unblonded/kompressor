@@ -62,7 +62,7 @@ void beginFrameUi();
 enum class Ico {
     Folder, FolderOpen, File, Archive, Image, Code, Exec, Text, Link,
     Open, Box, Bolt, Extract, Shield, Sparkle, Search, Close, Up, Chevron, Lock, Check, Warn, Info, Error,
-    Plus, Trash, Eye, Panel, Logo, Drop, Clock, Layers, Gauge, Hash,
+    Plus, Trash, Eye, Panel, Logo, Drop, Clock, Layers, Gauge, Hash, Gear,
 };
 // Draws a vector icon centred in the square at p (top-left) of side s.
 void drawIco(ImDrawList* dl, Ico ic, ImVec2 p, float s, ImU32 c);

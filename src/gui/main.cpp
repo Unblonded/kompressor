@@ -110,6 +110,8 @@ ImFont* loadFonts(float px, ImFont** monoOut) {
 
 }  // namespace
 
+void (*g_prevCreateWindow)(ImGuiViewport*) = nullptr;  // backend's Platform_CreateWindow
+
 float g_pendingScale = 0.0f;  // set by the content-scale callback, applied before the next frame
 float g_currentScale = 0.0f;
 std::function<void()> g_render;  // renders one frame; used by the window-refresh callback
@@ -160,6 +162,14 @@ int main(int argc, char** argv) {
         }
     // Launched from the Explorer menu: "--shell <action> <path>". Explorer starts one process per selected
     // item; the first one collects the rest and the others exit right here.
+    bool openSettings = false, debugDetach = false;
+    for (size_t i = 1; i < args.size();)
+        if (args[i] == "--settings" || args[i] == "--debug-detach") {
+            (args[i] == "--settings" ? openSettings : debugDetach) = true;
+            args.erase(args.begin() + i);
+        } else {
+            ++i;
+        }
     std::string shellAction;
     std::vector<std::string> shellPaths;
     if (args.size() >= 3 && args[1] == "--shell") {
@@ -205,6 +215,16 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename = nullptr;  // layout is fixed; nothing worth persisting
+    // Dialogs can be dragged out of the main window and become windows of their own.
+    // (Not on Wayland: clients there cannot position their windows.)
+    bool viewports = true;
+#if defined(__linux__) && GLFW_VERSION_MINOR >= 4
+    viewports = glfwGetPlatform() != GLFW_PLATFORM_WAYLAND;
+#endif
+    if (viewports) {
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+        io.ConfigViewportsNoTaskBarIcon = true;  // they belong to the main window, not the taskbar
+    }
 
     // HiDPI: macOS works in points with a 2x framebuffer; Windows/Linux work in pixels.
     // The scale follows the monitor the window is on (e.g. 100% on a 1080p screen, 175% on 4K):
@@ -216,6 +236,14 @@ int main(int argc, char** argv) {
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl);
+    if (viewports) {
+        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+        g_prevCreateWindow = pio.Platform_CreateWindow;
+        pio.Platform_CreateWindow = [](ImGuiViewport* vp) {
+            g_prevCreateWindow(vp);
+            kzgui::frame::styleDetached(vp->PlatformHandleRaw);
+        };
+    }
     glfwSetWindowContentScaleCallback(window, [](GLFWwindow*, float x, float) { g_pendingScale = x; });
 
     {
@@ -223,6 +251,8 @@ int main(int argc, char** argv) {
         g_app = &app;
         glfwSetDropCallback(window, onDrop);
         if (!snapshotSelect.empty()) app.debugSelect(snapshotSelect);
+        if (openSettings) app.showSettings();
+        if (debugDetach) app.debugDetach();
 
         // Files passed on the command line / "Open with": archives open, anything else is queued to compress.
         std::vector<std::string> toCompress;
@@ -294,6 +324,11 @@ int main(int argc, char** argv) {
                     std::fclose(f);
                 }
                 glfwSetWindowShouldClose(window, 1);
+            }
+            if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+                ImGui::UpdatePlatformWindows();  // dialogs dragged outside the main window
+                ImGui::RenderPlatformWindowsDefault();
+                glfwMakeContextCurrent(window);
             }
             glfwSwapBuffers(window);
             inFrame = false;
