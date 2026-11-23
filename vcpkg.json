@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "kompressor",
+  "version-string": "1.0.0",
+  "description": "Kompressor - universal archive extractor and super compressor",
+  "dependencies": [
+    {
+      "name": "libarchive",
+      "default-features": false,
+      "features": [
+        "bzip2",
+        "lz4",
+        "lzma",
+        "zstd",
+        { "name": "crypto", "platform": "linux" }
+      ]
+    },
+    "liblzma",
+    "zstd",
+    "zlib",
+    "bzip2",
+    "lz4"
+  ]
+}

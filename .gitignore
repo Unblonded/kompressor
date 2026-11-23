@@ -1,0 +1,6 @@
+build/
+*.kztmp
+.DS_Store
+/vcpkg_installed/
+.vscode/
+.idea/

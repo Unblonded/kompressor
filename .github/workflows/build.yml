@@ -1,0 +1,83 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      VCPKG_ROOT: C:\vcpkg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Configure (vcpkg static)
+        run: cmake --preset windows
+      - name: Build
+        run: cmake --build --preset windows
+      - name: Smoke test
+        shell: bash
+        run: |
+          ./build/windows/kompressor-cli.exe super t.kmp src -m fast
+          ./build/windows/kompressor-cli.exe test t.kmp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kompressor-windows-x64
+          path: |
+            build/windows/Kompressor.exe
+            build/windows/kompressor-cli.exe
+
+  macos-universal:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+      - run: brew install ninja
+      - name: Configure (Universal 2)
+        run: cmake --preset macos-universal
+      - name: Build
+        run: cmake --build --preset macos-universal
+      - name: Check architectures + smoke test
+        run: |
+          lipo -info build/macos-universal/Kompressor.app/Contents/MacOS/Kompressor
+          ./build/macos-universal/kompressor-cli super t.kmp src -m fast
+          ./build/macos-universal/kompressor-cli test t.kmp
+      - name: Package
+        run: cd build/macos-universal && ditto -c -k --keepParent Kompressor.app Kompressor-macOS-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kompressor-macos-universal
+          path: |
+            build/macos-universal/Kompressor-macOS-universal.zip
+            build/macos-universal/kompressor-cli
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libarchive-dev liblzma-dev libzstd-dev \
+            libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxkbcommon-dev
+      - name: Configure
+        run: cmake --preset release
+      - name: Build
+        run: cmake --build --preset release
+      - name: Smoke test
+        run: |
+          ./build/release/kompressor-cli super t.kmp src -m ultra
+          ./build/release/kompressor-cli test t.kmp
+          ./build/release/kompressor-cli create t.7z src && ./build/release/kompressor-cli test t.7z
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kompressor-linux-x64
+          path: |
+            build/release/Kompressor
+            build/release/kompressor-cli
