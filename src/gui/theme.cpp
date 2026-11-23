@@ -296,6 +296,14 @@ void drawIco(ImDrawList* dl, Ico ic, ImVec2 p, float s, ImU32 c) {
             dl->AddLine(P(0.50f, 0.16f), P(0.50f, 0.86f), c, t);
             dl->AddPolyline(std::array<ImVec2, 3>{P(0.22f, 0.44f), P(0.50f, 0.16f), P(0.78f, 0.44f)}.data(), 3, c, 0, t);
             break;
+        case Ico::Back:
+            dl->AddLine(P(0.16f, 0.50f), P(0.86f, 0.50f), c, t);
+            dl->AddPolyline(std::array<ImVec2, 3>{P(0.44f, 0.22f), P(0.16f, 0.50f), P(0.44f, 0.78f)}.data(), 3, c, 0, t);
+            break;
+        case Ico::Forward:
+            dl->AddLine(P(0.14f, 0.50f), P(0.84f, 0.50f), c, t);
+            dl->AddPolyline(std::array<ImVec2, 3>{P(0.56f, 0.22f), P(0.84f, 0.50f), P(0.56f, 0.78f)}.data(), 3, c, 0, t);
+            break;
         case Ico::Chevron:
             dl->AddPolyline(std::array<ImVec2, 3>{P(0.38f, 0.22f), P(0.64f, 0.50f), P(0.38f, 0.78f)}.data(), 3, c, 0, t);
             break;

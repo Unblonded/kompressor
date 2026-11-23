@@ -89,6 +89,11 @@ bool createArchive(const std::vector<std::string>& inputs, const std::string& ou
 bool convertToKmp(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
                   Progress& prog, CompressResult& res, std::string& err);
 
+// Re-packs any readable archive (including .kmp) into any output format without extracting to disk.
+// Single-file formats (GZ, XZ, ...) need a source holding exactly one file.
+bool convertArchive(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
+                    Progress& prog, CompressResult& res, std::string& err);
+
 std::string libraryVersions();
 
 }  // namespace kz

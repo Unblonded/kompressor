@@ -288,10 +288,45 @@ void App::loadTab(int tabId) {
     t->loadProg = j.prog;
 }
 
+void App::navigateTo(ExplorerTab& t, int dir, int select, bool record) {
+    if (dir < 0 || dir >= (int)t.nodes.size() || !t.nodes[dir].isDir) return;
+    if (dir != t.cwd && record) {
+        t.back.push_back(t.cwd);
+        if (t.back.size() > 200) t.back.erase(t.back.begin());
+        t.forward.clear();
+    }
+    t.cwd = dir;
+    t.selection.clear();
+    if (select >= 0) t.selection.insert(select);
+    t.anchor = select;
+    t.filter[0] = 0;
+    requestPreview(t, -1);
+    computeRows(t);
+}
+
+void App::goBack(ExplorerTab& t) {
+    if (t.back.empty()) return;
+    int from = t.cwd, to = t.back.back();
+    t.back.pop_back();
+    t.forward.push_back(from);
+    // Coming back out of a sub-folder: keep that folder selected, like Explorer does.
+    navigateTo(t, to, from < (int)t.nodes.size() && t.nodes[from].parent == to ? from : -1, false);
+}
+
+void App::goForward(ExplorerTab& t) {
+    if (t.forward.empty()) return;
+    int to = t.forward.back();
+    t.forward.pop_back();
+    t.back.push_back(t.cwd);
+    navigateTo(t, to, -1, false);
+}
+
 void App::buildTree(ExplorerTab& t) {
     t.nodes.clear();
     t.selection.clear();
     t.cwd = 0;
+    t.back.clear();
+    t.forward.clear();
     t.previewNode = -1;
     Node root;
     root.name = t.title;
@@ -633,41 +668,61 @@ void App::runTest(int tabId) {
         });
 }
 
-void App::actionConvert(ExplorerTab& t) {
-    conv_ = ConvertState();
-    conv_.open = true;
-    conv_.focus = true;
-    conv_.tabId = t.id;
+
+void App::actionConvert(ExplorerTab& t, bool super) {
+    ConvertState c;
+    c.open = true;
+    c.focus = true;
+    c.tabId = t.id;
+    c.dedup = conv_.dedup;
+    c.openWhenDone = conv_.openWhenDone;
+    // Default target: KMP for "super", otherwise 7Z for ZIP sources and ZIP for everything else.
+    kz::OutFormat want = super ? kz::OutFormat::Kmp : kz::OutFormat::Zip;
+    std::string fmt = lower(t.info.format);
+    if (!super && fmt.find("zip") != std::string::npos && fmt.find("7-zip") == std::string::npos) want = kz::OutFormat::SevenZip;
+    c.format = formatIndex(want);
+    c.level = kz::formatDesc(want).defLevel;
+    c.mode = 2;
     std::string base = t.src.inMemory() ? lastDir_ : parentDir(t.src.path);
     std::string stem = kz::stripArchiveExt(t.src.name());
-    if (t.info.isKmp) stem += "-repacked";
-    copyTo(conv_.out, sizeof conv_.out, kz::pathToUtf8(kz::u8path(base) / kz::u8path(stem + ".kmp")));
+    std::string out = kz::pathToUtf8(kz::u8path(base) / kz::u8path(stem + kz::formatDesc(want).ext));
+    if (!t.src.inMemory() && kz::u8path(out) == kz::u8path(t.src.path))
+        out = kz::pathToUtf8(kz::u8path(base) / kz::u8path(stem + "-recompressed" + kz::formatDesc(want).ext));
+    copyTo(c.out, sizeof c.out, out);
+    conv_ = c;
 }
 
-void App::runConvert(int tabId, std::string out, int mode) {
+void App::runConvert(int tabId, std::string out, kz::CompressOptions o, bool openWhenDone) {
     ExplorerTab* t = tabById(tabId);
     if (!t) return;
     kz::Source src = t->src;
     std::string title = t->title, pw = t->password;
     uint64_t before = t->info.archiveSize;
     auto res = std::make_shared<kz::CompressResult>();
-    kz::CompressOptions o;
-    o.format = kz::OutFormat::Kmp;
-    o.level = mode;
-    startJob("Super-compressing " + title,
-        [=](kz::Progress& p, std::string& err) { return kz::convertToKmp(src, out, o, pw, p, *res, err); },
-        [this, res, out, title, before](Job& j) {
+    std::string fname = kz::formatDesc(o.format).name;
+    startJob("Recompressing " + title + " to " + fname,
+        [=](kz::Progress& p, std::string& err) { return kz::convertArchive(src, out, o, pw, p, *res, err); },
+        [this, res, out, title, before, openWhenDone, tabId, o](Job& j) {
             for (auto& w : j.prog->warnings()) log(col::Warn, w);
             if (j.ok) {
-                double saved = before ? 100.0 * (1.0 - double(res->outputBytes) / double(before)) : 0.0;
                 char buf[160];
-                std::snprintf(buf, sizeof buf, " (%s -> %s, %.1f%% smaller)", kz::humanSize(before).c_str(),
-                              kz::humanSize(res->outputBytes).c_str(), saved);
-                log(col::Ok, "Super-compressed " + title + buf, out, out);
+                if (before && res->outputBytes <= before)
+                    std::snprintf(buf, sizeof buf, " (%s -> %s, %.1f%% smaller)", kz::humanSize(before).c_str(),
+                                  kz::humanSize(res->outputBytes).c_str(), 100.0 * (1.0 - double(res->outputBytes) / double(before)));
+                else
+                    std::snprintf(buf, sizeof buf, " (%s -> %s)", kz::humanSize(before).c_str(), kz::humanSize(res->outputBytes).c_str());
+                log(col::Ok, "Recompressed " + title + " to " + kz::fileNameOf(out) + buf, out, out);
                 toast(col::Ok, "Created " + kz::fileNameOf(out) + buf);
+                if (openWhenDone) openArchive(out);
+            } else if (j.prog->needPassword) {
+                askPassword("\"" + title + "\" is encrypted. Enter its password to recompress it:",
+                            [this, tabId, out, o, openWhenDone](const std::string& p) {
+                                if (ExplorerTab* t2 = tabById(tabId)) t2->password = p;
+                                runConvert(tabId, out, o, openWhenDone);
+                            });
             } else {
-                log(col::Error, "Conversion failed: " + j.message);
-                toast(col::Error, "Conversion failed");
+                log(col::Error, "Recompress failed (" + title + "): " + j.message);
+                toast(col::Error, "Recompress failed: " + j.message);
             }
         });
 }

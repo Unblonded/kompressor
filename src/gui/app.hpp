@@ -56,6 +56,7 @@ struct ExplorerTab {
     int anchor = -1;
     char filter[256] = {};
     std::vector<int> rows;  // currently displayed rows (node ids)
+    std::vector<int> back, forward;  // folder history (node ids) for Back / Forward
     int sortCol = 0;
     bool sortAsc = true;
     // preview
@@ -92,6 +93,8 @@ public:
     void showSettings() { showSettings_ = true; }
     // Debug aid: place the Settings dialog beside the main window (tests detached viewports).
     void debugDetach() { debugDetach_ = true; }
+    // Debug aid: open the Recompress dialog once the active archive has loaded.
+    void debugRecompress() { debugRecompress_ = true; }
     bool busy() const;
     // Debug aid for --snapshot: navigate to and preview an entry once the active tab has loaded.
     void debugSelect(const std::string& entryPath) { debugSelect_ = entryPath; }
@@ -113,6 +116,10 @@ private:
     void requestPreview(ExplorerTab& t, int node);
     void openNested(ExplorerTab& t, int node);
     std::vector<std::string> selectedPaths(ExplorerTab& t, bool& any);
+    // Opens folder `dir` in the tab; `record` adds the folder being left to the Back history.
+    void navigateTo(ExplorerTab& t, int dir, int select = -1, bool record = true);
+    void goBack(ExplorerTab& t);
+    void goForward(ExplorerTab& t);
 
     // drawing
     void drawMenuBar();
@@ -135,11 +142,11 @@ private:
     void actionOpen();
     void actionExtract(ExplorerTab& t, bool selectionOnly);
     void actionTest(ExplorerTab& t);
-    void actionConvert(ExplorerTab& t);
+    void actionConvert(ExplorerTab& t, bool super = false);  // recompress into another format
     void askPassword(const std::string& prompt, std::function<void(const std::string&)> onOk);
     void runExtract(int tabId, kz::ExtractOptions o, bool reveal);
     void runTest(int tabId);
-    void runConvert(int tabId, std::string out, int mode);
+    void runConvert(int tabId, std::string out, kz::CompressOptions o, bool openWhenDone);
     void runCompress();
     void closeTab(int id);
     void drawFormats();
@@ -162,7 +169,7 @@ private:
     bool showActivity_ = true;
     bool showAbout_ = false;
     bool showSettings_ = false;
-    bool debugDetach_ = false;
+    bool debugDetach_ = false, debugRecompress_ = false;
     bool showDemo_ = false;
     std::string lastDir_;
     bool shellMenu_ = false;  // Explorer right-click menu installed
@@ -198,7 +205,12 @@ private:
         bool open = false, focus = false;
         int tabId = -1;
         char out[2048] = {};
-        int mode = 2;
+        int format = 0;  // index into kz::outputFormats()
+        int level = 0;
+        int mode = 2;    // KMP mode
+        bool dedup = true;
+        bool openWhenDone = true;
+        char pw[256] = {}, pw2[256] = {};
     } conv_;
 
     struct PasswordState {

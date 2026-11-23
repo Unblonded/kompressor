@@ -349,7 +349,8 @@ void App::drawMenuBar() {
         if (ImGui::MenuItem("Extract Selected...", nullptr, false, !at->selection.empty())) actionExtract(*at, true);
         if (ImGui::MenuItem("Test Integrity")) actionTest(*at);
         ImGui::Separator();
-        if (ImGui::MenuItem("Super Compress to .kmp...")) actionConvert(*at);
+        if (ImGui::MenuItem("Recompress As...")) actionConvert(*at);
+        if (ImGui::MenuItem("Super Compress to .kmp...")) actionConvert(*at, true);
         if (ImGui::MenuItem("Reload")) loadTab(at->id);
         if (!at->src.inMemory() && ImGui::MenuItem("Show in File Manager")) reveal(at->src.path);
         ImGui::EndMenu();
@@ -450,14 +451,23 @@ void App::drawToolbar() {
     if (ghostButton("Open", Ico::Open, ImVec2(0, bh))) actionOpen();
     ImGui::SetItemTooltip("Open and explore an archive without extracting it (%s+O)", kMod);
     ImGui::SameLine(0, sp);
-    if (ghostButton("Compress", Ico::Box, ImVec2(0, bh))) openCompressDialog({}, false);
-    ImGui::SetItemTooltip("Create a ZIP, 7Z, TAR.XZ, TAR.ZST... archive (%s+N)", kMod);
-    ImGui::SameLine(0, sp * 2);
-    if (primaryButton("Super Compress", Ico::Bolt, ImVec2(0, bh))) openCompressDialog({}, true);
-    ImGui::SetItemTooltip("Kompressor's own .kmp format: dedup + content-aware LZMA2/Zstd");
-
+    // With an archive open, Compress and Super Compress re-pack that archive into another format.
     ExplorerTab* at = tabById(activeTab_);
     bool ready = at && !at->loading && !at->nodes.empty();
+    if (ghostButton("Compress", Ico::Box, ImVec2(0, bh))) {
+        if (ready) actionConvert(*at);
+        else openCompressDialog({}, false);
+    }
+    if (ready) ImGui::SetItemTooltip("Recompress \"%s\" into another format (ZIP, 7Z, TAR.ZST...)", at->title.c_str());
+    else ImGui::SetItemTooltip("Create a ZIP, 7Z, TAR.XZ, TAR.ZST... archive (%s+N)", kMod);
+    ImGui::SameLine(0, sp * 2);
+    if (primaryButton("Super Compress", Ico::Bolt, ImVec2(0, bh))) {
+        if (ready) actionConvert(*at, true);
+        else openCompressDialog({}, true);
+    }
+    if (ready) ImGui::SetItemTooltip("Recompress \"%s\" into Kompressor's .kmp format", at->title.c_str());
+    else ImGui::SetItemTooltip("Kompressor's own .kmp format: dedup + content-aware LZMA2/Zstd");
+
     if (ready) {
         ImGui::SameLine(0, em * 0.9f);
         ImVec2 sp0 = ImGui::GetCursorScreenPos();
@@ -471,9 +481,6 @@ void App::drawToolbar() {
         ImGui::SameLine(0, sp);
         if (ghostButton("Test", Ico::Shield, ImVec2(0, bh))) actionTest(*at);
         ImGui::SetItemTooltip("Decompress everything in memory and verify checksums");
-        ImGui::SameLine(0, sp);
-        if (ghostButton("To .kmp", Ico::Sparkle, ImVec2(0, bh))) actionConvert(*at);
-        ImGui::SetItemTooltip("Re-pack this archive into Kompressor's super format (no temp files)");
     }
 
     // right: settings + activity toggle
@@ -692,6 +699,10 @@ void App::drawExplorer(ExplorerTab& t) {
             }
         debugSelect_.clear();
     }
+    if (debugRecompress_ && !t.loading && !t.nodes.empty()) {
+        debugRecompress_ = false;
+        actionConvert(t);
+    }
     if (t.loading) {
         ImVec2 avail = ImGui::GetContentRegionAvail();
         float w = std::min(avail.x, em * 24);
@@ -749,15 +760,24 @@ void App::drawExplorer(ExplorerTab& t) {
 
     // --- navigation row: up, breadcrumbs, search
     float rowH = ImGui::GetFrameHeight();
-    ImGui::BeginDisabled(t.cwd == 0);
+    bool goBk = iconButton("##back", Ico::Back, rowH, "Back (Alt+Left, mouse back button)", !t.back.empty());
+    ImGui::SameLine(0, em * 0.1f);
+    bool goFw = iconButton("##fwd", Ico::Forward, rowH, "Forward (Alt+Right, mouse forward button)", !t.forward.empty());
+    ImGui::SameLine(0, em * 0.1f);
     bool up = iconButton("##up", Ico::Up, rowH, "Up one level (Backspace)", t.cwd != 0);
-    ImGui::EndDisabled();
-    if (up || (t.cwd != 0 && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Backspace, false))) {
-        int from = t.cwd;
-        t.cwd = std::max(0, t.nodes[t.cwd].parent);
-        t.selection = {from};
-        computeRows(t);
-    }
+    // Side mouse buttons (X1 = back, X2 = forward) work anywhere in the window, plus Alt+Left / Alt+Right.
+    bool noModal = !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+    bool overMain = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    if (noModal && ((overMain && ImGui::IsMouseClicked(3)) ||
+                    ImGui::Shortcut(ImGuiMod_Alt | ImGuiKey_LeftArrow, ImGuiInputFlags_RouteGlobal)))
+        goBk = !t.back.empty();
+    if (noModal && ((overMain && ImGui::IsMouseClicked(4)) ||
+                    ImGui::Shortcut(ImGuiMod_Alt | ImGuiKey_RightArrow, ImGuiInputFlags_RouteGlobal)))
+        goFw = !t.forward.empty();
+    if (goBk) goBack(t);
+    else if (goFw) goForward(t);
+    else if (up || (t.cwd != 0 && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Backspace, false)))
+        navigateTo(t, std::max(0, t.nodes[t.cwd].parent), t.cwd);
     ImGui::SameLine(0, em * 0.4f);
     std::vector<int> crumbs;
     for (int n = t.cwd; n >= 0; n = t.nodes[n].parent) crumbs.push_back(n);
@@ -790,11 +810,7 @@ void App::drawExplorer(ExplorerTab& t) {
         ImGui::PushID((int)i);
         bool last = i + 1 == crumbs.size();
         Ico ai = t.info.isKmp ? Ico::Sparkle : Ico::Archive;
-        if (crumb(t.nodes[crumbs[i]].name.c_str(), last, i == 0 ? &ai : nullptr)) {
-            t.cwd = crumbs[i];
-            t.selection.clear();
-            computeRows(t);
-        }
+        if (crumb(t.nodes[crumbs[i]].name.c_str(), last, i == 0 ? &ai : nullptr)) navigateTo(t, crumbs[i]);
         ImGui::PopID();
     }
     ImGui::SameLine(ImGui::GetContentRegionMax().x - searchW);
@@ -1037,11 +1053,7 @@ void App::drawTable(ExplorerTab& t, float width) {
             t.selection = std::set<int>(t.rows.begin(), t.rows.end());
     }
     if (openDir >= 0) {
-        t.cwd = openDir;
-        t.selection.clear();
-        t.filter[0] = 0;
-        requestPreview(t, -1);
-        computeRows(t);
+        navigateTo(t, openDir);
     } else if (openFile >= 0) {
         if (kz::looksLikeArchive(t.nodes[openFile].name)) openNested(t, openFile);
         else requestPreview(t, openFile);
@@ -1767,25 +1779,126 @@ void App::drawConvertWindow() {
         ImGui::SetNextWindowFocus();
         conv_.focus = false;
     }
-    std::string sub = "Re-pack \"" + t->title + "\" into .kmp. Entries stream straight from the source; nothing is extracted to disk.";
-    if (!beginDialog("###convert", "Super compress to .kmp", sub.c_str(), Ico::Sparkle, &conv_.open, em * 40, col::Accent)) {
+    const auto& formats = kz::outputFormats();
+    const auto& fd = formats[conv_.format];
+    bool isKmp = fd.id == kz::OutFormat::Kmp;
+    size_t files = 0;
+    for (auto& e : t->info.entries) files += (!e.isDir && !e.isSymlink) ? 1 : 0;
+
+    std::string sub = "Re-pack \"" + t->title + "\" into another format. Entries stream straight across; nothing is extracted to disk.";
+    if (!beginDialog("###convert", "Recompress archive", sub.c_str(), isKmp ? Ico::Bolt : Ico::Box, &conv_.open, em * 44,
+                     isKmp ? col::Accent : col::Teal)) {
         endDialog();
         return;
     }
     float inner = ImGui::GetContentRegionAvail().x;
-    caption("MODE");
-    struct M { const char* name; const char* desc; const char* badge; };
-    static const M modes[] = {
-        {"Fast", "Zstd + dedup. Seconds, not minutes.", nullptr},
-        {"Balanced", "Zstd-19 with long-range matching.", nullptr},
-        {"Ultra", "LZMA2 + code filters + text tuning.", "BEST"},
-        {"Max", "Every codec on every block. Slow.", nullptr},
-    };
-    float cw = (inner - em * 0.6f) * 0.5f, chh = em * 3.6f;
-    for (int i = 0; i < 4; ++i) {
-        if (i % 2) ImGui::SameLine(0, em * 0.6f);
-        if (optionCard(modes[i].name, modes[i].name, modes[i].desc, conv_.mode == i, ImVec2(cw, chh), modes[i].badge)) conv_.mode = i;
+
+    // --- source summary
+    {
+        ImGui::PushFont(fonts().caption);
+        char buf[256];
+        std::snprintf(buf, sizeof buf, "%s  -  %zu files, %s", t->info.format.c_str(), files,
+                      kz::humanSize(t->info.totalSize).c_str());
+        icon(Ico::Archive, em * 0.95f, col::Dim);
+        ImGui::SameLine(0, em * 0.4f);
+        ImGui::TextColored(col::Dim, "%s", buf);
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(0, em * 0.2f));
     }
+
+    // --- format
+    caption("FORMAT");
+    {
+        float x0 = ImGui::GetCursorPosX(), maxX = x0 + inner;
+        for (size_t i = 0; i < formats.size(); ++i) {
+            ImGui::PushFont(fonts().bold);
+            float pw = ImGui::CalcTextSize(formats[i].name).x + em * 1.6f;
+            ImGui::PopFont();
+            if (i) {
+                ImGui::SameLine(0, em * 0.4f);
+                if (ImGui::GetCursorPosX() + pw > maxX) {
+                    ImGui::NewLine();
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y * 0.4f);
+                }
+            }
+            // GZ, XZ, ... hold a single file: only offered when the archive has exactly one.
+            bool usable = !formats[i].singleFile || files == 1;
+            ImGui::BeginDisabled(!usable);
+            if (pill(formats[i].name, (int)i == conv_.format)) {
+                conv_.format = (int)i;
+                conv_.level = formats[i].defLevel;
+                if (conv_.out[0]) {
+                    std::string o = kz::withFormatExtension(conv_.out, formats[i].id);
+                    if (!t->src.inMemory() && kz::u8path(o) == kz::u8path(t->src.path))  // don't target the source itself
+                        o = kz::pathToUtf8(kz::u8path(parentDir(o)) /
+                                           kz::u8path(kz::stripArchiveExt(kz::fileNameOf(o)) + "-recompressed" + formats[i].ext));
+                    copyTo(conv_.out, sizeof conv_.out, o);
+                }
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(usable ? "%s  (%s)" : "%s  (%s)\nOnly for archives that hold a single file - use TAR.* for several.",
+                                  formats[i].description, formats[i].ext);
+        }
+    }
+    ImGui::PushFont(fonts().caption);
+    ImGui::TextColored(col::Dim, "%s", fd.description);
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, em * 0.3f));
+
+    // --- mode / level
+    if (isKmp) {
+        caption("MODE");
+        struct M { const char* name; const char* desc; const char* badge; };
+        static const M modes[] = {
+            {"Fast", "Zstd + dedup. Seconds, not minutes.", nullptr},
+            {"Balanced", "Zstd-19 with long-range matching.", nullptr},
+            {"Ultra", "LZMA2 + code filters + text tuning.", "BEST"},
+            {"Max", "Every codec on every block. Slow.", nullptr},
+        };
+        float cw = (inner - em * 0.6f) * 0.5f, chh = em * 3.6f;
+        for (int i = 0; i < 4; ++i) {
+            if (i % 2) ImGui::SameLine(0, em * 0.6f);
+            if (optionCard(modes[i].name, modes[i].name, modes[i].desc, conv_.mode == i, ImVec2(cw, chh), modes[i].badge)) conv_.mode = i;
+        }
+        ImGui::Dummy(ImVec2(0, em * 0.1f));
+        toggle("Deduplicate repeated data (content-defined chunking)", &conv_.dedup);
+    } else if (fd.minLevel < fd.maxLevel) {
+        caption("LEVEL");
+        ImGui::SameLine();
+        ImGui::PushFont(fonts().caption);
+        const char* ln = conv_.level <= fd.minLevel + (fd.maxLevel - fd.minLevel) / 3
+                             ? "faster"
+                             : (conv_.level >= fd.maxLevel - (fd.maxLevel - fd.minLevel) / 4 ? "smallest" : "balanced");
+        ImGui::TextColored(col::AccentHover, "%d  -  %s", conv_.level, ln);
+        ImGui::PopFont();
+        slider("##clevel", &conv_.level, fd.minLevel, fd.maxLevel, inner);
+    }
+
+    // --- password for the new archive
+    bool pwMismatch = false;
+    if (fd.password) {
+        ImGui::Dummy(ImVec2(0, em * 0.2f));
+        caption("ENCRYPTION  -  AES-256 (OPTIONAL)");
+        float hw = (inner - em * 0.6f) * 0.5f;
+        ImGui::SetNextItemWidth(hw);
+        ImGui::InputTextWithHint("##cpw", "Password", conv_.pw, sizeof conv_.pw, ImGuiInputTextFlags_Password);
+        ImGui::SameLine(0, em * 0.6f);
+        ImGui::SetNextItemWidth(hw);
+        ImGui::InputTextWithHint("##cpw2", "Confirm password", conv_.pw2, sizeof conv_.pw2, ImGuiInputTextFlags_Password);
+        pwMismatch = std::strcmp(conv_.pw, conv_.pw2) != 0;
+        if (pwMismatch && conv_.pw2[0]) {
+            icon(Ico::Warn, em * 0.95f, col::Error);
+            ImGui::SameLine(0, em * 0.4f);
+            ImGui::TextColored(col::Error, "Passwords do not match");
+        } else if (conv_.pw[0] && !pwMismatch) {
+            icon(Ico::Lock, em * 0.95f, col::Ok);
+            ImGui::SameLine(0, em * 0.4f);
+            ImGui::TextColored(col::Ok, "The new archive will be encrypted with AES-256");
+        }
+    }
+
+    // --- output
     ImGui::Dummy(ImVec2(0, em * 0.2f));
     caption("SAVE TO");
     float bw = em * 6.5f;
@@ -1794,25 +1907,67 @@ void App::drawConvertWindow() {
     ImGui::SameLine(0, em * 0.5f);
     if (secondaryButton("Browse...", ImVec2(bw, ImGui::GetFrameHeight()))) {
         std::string cur = conv_.out;
-        fileDlg_.open("Save .kmp As", FileDialog::Mode::SaveFile, parentDir(cur),
-                      [this](const std::vector<std::string>& p) {
-                          copyTo(conv_.out, sizeof conv_.out, kz::withFormatExtension(p[0], kz::OutFormat::Kmp));
+        fileDlg_.open("Save Archive As", FileDialog::Mode::SaveFile, parentDir(cur),
+                      [this, files](const std::vector<std::string>& p) {
+                          std::string o = p[0];
+                          kz::OutFormat f;
+                          if (kz::formatFromFileName(o, f) && (!kz::formatDesc(f).singleFile || files == 1)) {
+                              conv_.format = formatIndex(f);
+                              conv_.level = kz::formatDesc(f).defLevel;
+                          } else {
+                              o = kz::withFormatExtension(o, kz::outputFormats()[conv_.format].id);
+                          }
+                          copyTo(conv_.out, sizeof conv_.out, o);
                       },
                       kz::fileNameOf(cur));
     }
+    bool overwritesSource = !t->src.inMemory() && conv_.out[0] && kz::u8path(conv_.out) == kz::u8path(t->src.path);
+    if (conv_.out[0] && !overwritesSource) {
+        std::filesystem::path op = kz::u8path(conv_.out);
+        std::string sep(1, (char)std::filesystem::path::preferred_separator);
+        std::string folder = kz::pathToUtf8(op.parent_path().filename());
+        std::string tail = (folder.empty() ? std::string() : "..." + sep + folder + sep) + kz::pathToUtf8(op.filename());
+        icon(Ico::FolderOpen, em * 0.9f, col::FolderCol);
+        ImGui::SameLine(0, em * 0.4f);
+        ImGui::PushFont(fonts().caption);
+        ImGui::TextColored(col::Dim, "%s", tail.c_str());
+        ImGui::PopFont();
+        ImGui::SetItemTooltip("%s", conv_.out);
+    }
+    if (overwritesSource) {
+        icon(Ico::Warn, em * 0.95f, col::Error);
+        ImGui::SameLine(0, em * 0.4f);
+        ImGui::TextColored(col::Error, "That is the archive being converted - pick another name");
+    }
+    toggle("Open the new archive when finished", &conv_.openWhenDone);
+
+    // --- footer
     ImGui::Dummy(ImVec2(0, em * 0.4f));
     {
         ImVec2 p = ImGui::GetCursorScreenPos();
         ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x - em * 1.5f, p.y), ImVec2(p.x + inner + em * 1.5f, p.y), u32(col::Line));
         ImGui::Dummy(ImVec2(0, em * 0.5f));
     }
-    float pbw = em * 11.5f, cbw = em * 6.5f, bh = ImGui::GetFrameHeight() * 1.15f;
+    float bh = ImGui::GetFrameHeight() * 1.15f;
+    if (ghostButton("Compress files instead", Ico::Plus, ImVec2(0, bh))) {
+        conv_.open = false;
+        openCompressDialog({}, isKmp);
+    }
+    ImGui::SetItemTooltip("Make a new archive from files and folders on disk");
+    ImGui::SameLine();
+    float pbw = em * 10.5f, cbw = em * 6.5f;
     alignRight(pbw + cbw + em * 0.6f);
     if (secondaryButton("Cancel", ImVec2(cbw, bh))) conv_.open = false;
     ImGui::SameLine(0, em * 0.6f);
-    ImGui::BeginDisabled(conv_.out[0] == 0);
-    if (primaryButton("Super compress", Ico::Bolt, ImVec2(pbw, bh))) {
-        runConvert(t->id, conv_.out, conv_.mode);
+    bool can = conv_.out[0] && !overwritesSource && !(fd.password && pwMismatch);
+    ImGui::BeginDisabled(!can);
+    if (primaryButton("Recompress", isKmp ? Ico::Bolt : Ico::Box, ImVec2(pbw, bh))) {
+        kz::CompressOptions o;
+        o.format = fd.id;
+        o.level = isKmp ? conv_.mode : conv_.level;
+        o.dedup = conv_.dedup;
+        o.password = fd.password ? conv_.pw : "";
+        runConvert(t->id, conv_.out, o, conv_.openWhenDone);
         conv_.open = false;
     }
     ImGui::EndDisabled();

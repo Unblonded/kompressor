@@ -30,7 +30,8 @@ static void usage() {
         "  kompressor-cli cat     <archive> <entry> [-p password]      (write one member to stdout)\n"
         "  kompressor-cli create  <out.zip|.7z|.tar.xz|...> <files/folders...> [-l level] [-p password] [-t threads]\n"
         "  kompressor-cli super   <out.kmp> <files/folders...> [-m fast|balanced|ultra|max] [-t threads] [--no-dedup]\n"
-        "  kompressor-cli convert <archive> <out.kmp> [-m mode] [-p password]\n"
+        "  kompressor-cli convert <archive> <out.zip|.7z|.tar.zst|.kmp|...> [-l level] [-m mode] [-p password]\n"
+        "                         [-e new-password]   (re-pack into another format; -e encrypts a ZIP output)\n"
         "  kompressor-cli formats\n",
         KZ_VERSION);
 }
@@ -79,7 +80,7 @@ int main(int argc, char** argv) {
     }
     std::string cmd = args[1];
     std::vector<std::string> pos;
-    std::string password, outDir, mode = "ultra";
+    std::string password, outDir, mode = "ultra", encrypt;
     int level = -1, threads = 0;
     bool skipExisting = false, dedup = true;
     for (size_t i = 2; i < args.size(); ++i) {
@@ -90,6 +91,7 @@ int main(int argc, char** argv) {
         else if (a == "-l") level = std::atoi(next().c_str());
         else if (a == "-t") threads = std::atoi(next().c_str());
         else if (a == "-m") mode = next();
+        else if (a == "-e") encrypt = next();
         else if (a == "--skip-existing") skipExisting = true;
         else if (a == "--no-dedup") dedup = false;
         else pos.push_back(a);
@@ -216,17 +218,22 @@ int main(int argc, char** argv) {
         if (pos.size() < 2) return usage(), 1;
         Source src{pos[0], nullptr, ""};
         CompressOptions o;
-        o.format = OutFormat::Kmp;
-        o.level = (int)parseMode(mode);
+        if (!formatFromFileName(pos[1], o.format)) {
+            std::fprintf(stderr, "error: cannot tell the format from '%s' (try .zip .7z .tar.xz .tar.zst .kmp ...)\n",
+                         pos[1].c_str());
+            return 1;
+        }
+        o.level = o.format == OutFormat::Kmp ? (level >= 0 ? level : (int)parseMode(mode)) : level;
+        o.password = encrypt;
         o.threads = threads;
         o.dedup = dedup;
         CompressResult res;
         auto t0 = std::chrono::steady_clock::now();
-        bool ok = run(prog, [&] { return convertToKmp(src, pos[1], o, password, prog, res, err); });
+        bool ok = run(prog, [&] { return convertArchive(src, pos[1], o, password, prog, res, err); });
         printWarnings(prog);
         if (!ok) {
             std::fprintf(stderr, "error: %s\n", err.c_str());
-            return 2;
+            return prog.needPassword ? 3 : 2;
         }
         double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::error_code ec;

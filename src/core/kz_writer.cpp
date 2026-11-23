@@ -582,4 +582,305 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
     return true;
 }
 
+namespace {
+
+// One entry of the source archive, as handed to the writer.
+struct ConvEntry {
+    std::string path;
+    int type = 0;  // 0 file, 1 dir, 2 symlink
+    uint32_t mode = 0;
+    int64_t mtime = 0;
+    uint64_t size = 0;
+    std::string link;
+};
+
+// Writes converted entries into a libarchive writer.
+class ConvWriter {
+public:
+    ConvWriter(archive* a, const FormatDesc& fd, Progress& prog) : a_(a), fd_(fd), prog_(prog) {}
+
+    // Starts an entry. Returns false on a fatal error (err set); `skip` is set when the entry is dropped.
+    bool begin(const ConvEntry& e, bool& skip, std::string& err) {
+        skip = false;
+        if (fd_.singleFile) {
+            if (e.type != 0) {
+                skip = true;
+                return true;
+            }
+            if (++files_ > 1) {
+                err = std::string(fd_.name) + " holds exactly one file, but this archive has several. Use TAR." +
+                      fd_.name + " (or ZIP/7Z/KMP) instead.";
+                return false;
+            }
+        } else if (e.type == 0) {
+            ++files_;
+        }
+        archive_entry* ae = archive_entry_new();
+#ifdef _WIN32
+        archive_entry_set_pathname_utf8(ae, e.path.c_str());
+#else
+        archive_entry_copy_pathname(ae, e.path.c_str());
+#endif
+        archive_entry_set_mtime(ae, (time_t)e.mtime, 0);
+        if (e.type == 1) {
+            archive_entry_set_filetype(ae, AE_IFDIR);
+            archive_entry_set_perm(ae, e.mode ? e.mode : 0755);
+            archive_entry_set_size(ae, 0);
+        } else if (e.type == 2) {
+            archive_entry_set_filetype(ae, AE_IFLNK);
+            archive_entry_set_perm(ae, 0777);
+            archive_entry_set_size(ae, 0);
+#ifdef _WIN32
+            archive_entry_set_symlink_utf8(ae, e.link.c_str());
+#else
+            archive_entry_copy_symlink(ae, e.link.c_str());
+#endif
+        } else {
+            archive_entry_set_filetype(ae, AE_IFREG);
+            archive_entry_set_perm(ae, e.mode ? e.mode : 0644);
+            archive_entry_set_size(ae, (la_int64_t)e.size);
+        }
+        int r = archive_write_header(a_, ae);
+        archive_entry_free(ae);
+        if (r < ARCHIVE_WARN) {
+            const char* m = archive_error_string(a_);
+            if (r == ARCHIVE_FATAL) {
+                err = m ? m : "write failed";
+                return false;
+            }
+            prog_.warn(e.path + ": " + (m ? m : "header error"));
+            skip = true;
+        }
+        return true;
+    }
+
+    bool write(const void* p, size_t n, std::string& err) {
+        if (archive_write_data(a_, p, n) < 0) {
+            err = archive_error_string(a_) ? archive_error_string(a_) : "write failed";
+            return false;
+        }
+        return true;
+    }
+
+    uint64_t files() const { return files_; }
+
+private:
+    archive* a_;
+    const FormatDesc& fd_;
+    Progress& prog_;
+    uint64_t files_ = 0;
+};
+
+}  // namespace
+
+bool convertArchive(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
+                    Progress& prog, CompressResult& res, std::string& err) {
+    if (opt.format == OutFormat::Kmp) return convertToKmp(src, outPath, opt, password, prog, res, err);
+    res = CompressResult();
+    const FormatDesc& fd = formatDesc(opt.format);
+    if (!opt.password.empty() && !fd.password) {
+        err = std::string(fd.name) + " does not support passwords - use ZIP for encryption";
+        return false;
+    }
+    if (!src.inMemory()) {  // never overwrite the archive we are reading from
+        std::error_code e1, e2;
+        if (fs::weakly_canonical(u8path(src.path), e1) == fs::weakly_canonical(u8path(outPath), e2)) {
+            err = "The output file is the archive being converted - choose another name";
+            return false;
+        }
+    }
+
+    archive* w = archive_write_new();
+    if (!configureWriter(w, opt, err)) {
+        archive_write_free(w);
+        return false;
+    }
+    std::string tmp = tmpPathFor(outPath);
+#ifdef _WIN32
+    int rc = archive_write_open_filename_w(w, u8path(tmp).wstring().c_str());
+#else
+    int rc = archive_write_open_filename(w, tmp.c_str());
+#endif
+    if (rc != ARCHIVE_OK) {
+        err = archive_error_string(w) ? archive_error_string(w) : "cannot create output";
+        archive_write_free(w);
+        return false;
+    }
+    ConvWriter cw(w, fd, prog);
+    bool ok = true;
+    auto fail = [&](const std::string& m) {
+        if (err.empty()) err = m;
+        ok = false;
+    };
+
+    if (kmp::isKmp(src)) {
+        kmp::Reader r;
+        if (!r.open(src, err)) {
+            ok = false;
+        } else {
+            uint64_t total = 0;
+            for (auto& e : r.entries()) total += e.size;
+            prog.total = total;
+            prog.done = 0;
+            for (size_t i = 0; ok && i < r.entries().size(); ++i) {
+                if (prog.cancelled()) {
+                    fail("Cancelled");
+                    break;
+                }
+                const auto& ke = r.entries()[i];
+                ConvEntry ce;
+                ce.path = ke.path;
+                ce.mode = ke.mode;
+                ce.mtime = ke.mtime;
+                ce.size = ke.size;
+                ce.type = ke.type == kmp::EntryType::Dir ? 1 : ke.type == kmp::EntryType::Symlink ? 2 : 0;
+                ce.link = ke.link;
+                bool skip = false;
+                if (!cw.begin(ce, skip, err)) {
+                    ok = false;
+                    break;
+                }
+                if (ce.type != 0) continue;
+                prog.setStatus(ce.path);
+                std::string ferr;
+                bool rd = r.readFile(i, [&](const uint8_t* p, size_t n) {
+                    prog.done += n;
+                    res.inputBytes += n;
+                    return skip || cw.write(p, n, err);
+                }, &prog, ferr);
+                if (!rd) fail(ferr.empty() ? "read error" : ferr);
+            }
+        }
+    } else {
+        archive* a = archive_read_new();
+        archive_read_support_filter_all(a);
+        archive_read_support_format_all(a);
+        archive_read_set_options(a, "cpio:hdrcharset=UTF-8,tar:hdrcharset=UTF-8");
+        if (!password.empty()) archive_read_add_passphrase(a, password.c_str());
+        if (src.inMemory())
+            rc = archive_read_open_memory(a, src.mem->data(), src.mem->size());
+        else
+#ifdef _WIN32
+            rc = archive_read_open_filename_w(a, u8path(src.path).wstring().c_str(), 1 << 20);
+#else
+            rc = archive_read_open_filename(a, src.path.c_str(), 1 << 20);
+#endif
+        if (rc != ARCHIVE_OK) {
+            fail(archive_error_string(a) ? archive_error_string(a) : "cannot open source archive");
+        } else {
+            prog.total = src.inMemory() ? src.mem->size() : fileSize(src.path);
+            prog.done = 0;
+            archive_entry* e;
+            std::vector<char> buf(kIoBuf);
+            while (ok && ((rc = archive_read_next_header(a, &e)) == ARCHIVE_OK || rc == ARCHIVE_WARN)) {
+                if (prog.cancelled()) {
+                    fail("Cancelled");
+                    break;
+                }
+                const char* pn = archive_entry_pathname_utf8(e);
+                if (!pn) pn = archive_entry_pathname(e);
+                ConvEntry ce;
+                if (!pn || !sanitizeRelativePath(toNFC(pn), ce.path)) {
+                    if (pn) prog.warn("Skipped unsafe path: " + std::string(pn));
+                    continue;
+                }
+                if (archive_entry_hardlink(e)) {
+                    prog.warn(ce.path + ": hard link skipped");
+                    continue;
+                }
+                ce.mode = (uint32_t)archive_entry_perm(e);
+                ce.mtime = archive_entry_mtime(e);
+                auto ft = archive_entry_filetype(e);
+                if (ft == AE_IFDIR) {
+                    ce.type = 1;
+                } else if (ft == AE_IFLNK) {
+                    ce.type = 2;
+                    const char* t = archive_entry_symlink_utf8(e);
+                    ce.link = t ? toNFC(t) : "";
+                } else if (ft != AE_IFREG && ft != 0) {
+                    prog.warn(ce.path + ": special file skipped");
+                    continue;
+                }
+                if (ce.type != 0) {
+                    bool skip;
+                    if (!cw.begin(ce, skip, err)) ok = false;
+                    continue;
+                }
+                prog.setStatus(ce.path);
+                // Headers need the size up front; when the source does not record it, read the data first.
+                std::vector<char> held;
+                bool sized = archive_entry_size_is_set(e) != 0;
+                la_ssize_t n = 0;
+                if (sized) {
+                    ce.size = (uint64_t)archive_entry_size(e);
+                } else {
+                    while ((n = archive_read_data(a, buf.data(), buf.size())) > 0) held.insert(held.end(), buf.data(), buf.data() + n);
+                    ce.size = held.size();
+                }
+                if (n < 0) {
+                    fail(archive_error_string(a) ? archive_error_string(a) : "read error");
+                    if (archive_entry_is_encrypted(e)) prog.needPassword = true;
+                    break;
+                }
+                bool skip = false;
+                if (!cw.begin(ce, skip, err)) {
+                    ok = false;
+                    break;
+                }
+                uint64_t written = 0;
+                if (!sized) {
+                    if (!skip && !held.empty() && !cw.write(held.data(), held.size(), err)) ok = false;
+                    written = held.size();
+                } else {
+                    while ((n = archive_read_data(a, buf.data(), buf.size())) > 0) {
+                        // never write past the size announced in the header
+                        size_t take = (size_t)std::min<uint64_t>((uint64_t)n, ce.size - std::min(ce.size, written));
+                        if (!skip && take && !cw.write(buf.data(), take, err)) {
+                            ok = false;
+                            break;
+                        }
+                        written += (uint64_t)n;
+                        prog.done = (uint64_t)archive_filter_bytes(a, -1);
+                        if (prog.cancelled()) break;
+                    }
+                    if (ok && n < 0) {
+                        fail(archive_error_string(a) ? archive_error_string(a) : "read error");
+                        if (archive_entry_is_encrypted(e)) prog.needPassword = true;
+                    }
+                }
+                res.inputBytes += written;
+                if (ok && !skip && !prog.cancelled() && written < ce.size) {  // keep the output valid
+                    std::vector<char> zeros((size_t)std::min<uint64_t>(ce.size - written, buf.size()));
+                    for (uint64_t left = ce.size - written; ok && left;) {
+                        size_t k = (size_t)std::min<uint64_t>(left, zeros.size());
+                        if (!cw.write(zeros.data(), k, err)) ok = false;
+                        left -= k;
+                    }
+                    prog.warn(ce.path + ": shorter than recorded (padded)");
+                }
+            }
+            if (ok && prog.cancelled()) fail("Cancelled");
+            if (ok && rc != ARCHIVE_EOF) fail(archive_error_string(a) ? archive_error_string(a) : "read error");
+        }
+        archive_read_free(a);
+    }
+
+    if (ok && fd.singleFile && cw.files() == 0) fail(std::string(fd.name) + " needs a file to compress, but the archive has none");
+    if (ok) {
+        if (opt.format == OutFormat::SevenZip || opt.format == OutFormat::Iso)
+            prog.setStatus("Finalizing (compressing solid stream)...");
+        if (archive_write_close(w) != ARCHIVE_OK) fail(archive_error_string(w) ? archive_error_string(w) : "close failed");
+    }
+    archive_write_free(w);
+    if (!ok) {
+        discardTemp(tmp);
+        return false;
+    }
+    if (!commitTemp(tmp, outPath, err)) return false;
+    res.files = cw.files();
+    res.outputBytes = fileSize(outPath);
+    res.summary = ratioText(res.inputBytes, res.outputBytes);
+    return true;
+}
+
 }  // namespace kz

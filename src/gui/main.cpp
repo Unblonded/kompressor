@@ -162,10 +162,10 @@ int main(int argc, char** argv) {
         }
     // Launched from the Explorer menu: "--shell <action> <path>". Explorer starts one process per selected
     // item; the first one collects the rest and the others exit right here.
-    bool openSettings = false, debugDetach = false;
+    bool openSettings = false, debugDetach = false, debugRecompress = false;
     for (size_t i = 1; i < args.size();)
-        if (args[i] == "--settings" || args[i] == "--debug-detach") {
-            (args[i] == "--settings" ? openSettings : debugDetach) = true;
+        if (args[i] == "--settings" || args[i] == "--debug-detach" || args[i] == "--debug-recompress") {
+            (args[i] == "--settings" ? openSettings : args[i] == "--debug-detach" ? debugDetach : debugRecompress) = true;
             args.erase(args.begin() + i);
         } else {
             ++i;
@@ -253,6 +253,7 @@ int main(int argc, char** argv) {
         if (!snapshotSelect.empty()) app.debugSelect(snapshotSelect);
         if (openSettings) app.showSettings();
         if (debugDetach) app.debugDetach();
+        if (debugRecompress) app.debugRecompress();
 
         // Files passed on the command line / "Open with": archives open, anything else is queued to compress.
         std::vector<std::string> toCompress;

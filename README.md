@@ -99,7 +99,8 @@ kompressor-cli test    <archive>
 kompressor-cli cat     <archive> <entry>            # one member to stdout
 kompressor-cli create  out.7z|.zip|.tar.xz|... <files/folders> [-l level] [-p pw]
 kompressor-cli super   out.kmp <files/folders> [-m fast|balanced|ultra|max] [--no-dedup]
-kompressor-cli convert <any-archive> out.kmp [-m mode]   # re-pack without temp files
+kompressor-cli convert <any-archive> out.7z|.zip|.tar.zst|.kmp|... [-l level] [-m mode] [-p pw] [-e new-pw]
+                                                     # re-pack into another format without temp files
 kompressor-cli formats
 ```
 
