@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -109,6 +110,7 @@ ImFont* loadFonts(float px, ImFont** monoOut) {
 
 float g_pendingScale = 0.0f;  // set by the content-scale callback, applied before the next frame
 float g_currentScale = 0.0f;
+std::function<void()> g_render;  // renders one frame; used by the window-refresh callback
 
 // (Re)builds fonts and style for a monitor content scale. Returns the style scale.
 float applyUiScale(float xs, ImFont** mono) {
@@ -214,11 +216,13 @@ int main(int argc, char** argv) {
         }
         if (!toCompress.empty()) app.openCompressDialog(toCompress, false);
 
-        while (!glfwWindowShouldClose(window)) {
-            // Sleep while idle; tick quickly only while work is running or animating.
-            if (app.busy()) glfwWaitEventsTimeout(1.0 / 30.0);
-            else glfwWaitEventsTimeout(0.5);
-
+        // One UI frame. Called from the main loop and from the window-refresh callback: while the user
+        // drags or resizes the window, Windows runs its own modal loop and our loop is paused, so
+        // repaint requests (e.g. the resize when crossing to a monitor with another DPI) render here.
+        bool inFrame = false;
+        auto renderFrame = [&] {
+            if (inFrame) return;  // e.g. a native file dialog dispatching WM_PAINT mid-frame
+            inFrame = true;
             if (g_pendingScale > 0.0f) {
                 float ns = g_pendingScale;
                 g_pendingScale = 0.0f;
@@ -252,7 +256,21 @@ int main(int argc, char** argv) {
                 glfwSetWindowShouldClose(window, 1);
             }
             glfwSwapBuffers(window);
+            inFrame = false;
+        };
+        g_render = renderFrame;
+        glfwSetWindowRefreshCallback(window, [](GLFWwindow*) {
+            if (g_render) g_render();
+        });
+
+        while (!glfwWindowShouldClose(window)) {
+            // Sleep while idle; tick quickly only while work is running or animating.
+            if (app.busy()) glfwWaitEventsTimeout(1.0 / 30.0);
+            else glfwWaitEventsTimeout(0.5);
+            renderFrame();
         }
+        glfwSetWindowRefreshCallback(window, nullptr);
+        g_render = nullptr;
         g_app = nullptr;
     }
 
