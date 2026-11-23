@@ -186,3 +186,10 @@ endif()
 if(KOMPRESSOR_BUILD_GUI)
   install(TARGETS Kompressor RUNTIME DESTINATION bin BUNDLE DESTINATION .)
 endif()
+
+if(WIN32)
+  # Rebuild the resources when the icon or manifest they embed changes (the RC compiler's
+  # dependency scan does not track these).
+  set_source_files_properties(packaging/windows/kompressor.rc packaging/windows/kompressor-cli.rc PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/packaging/icons/kompressor.ico;${CMAKE_SOURCE_DIR}/packaging/windows/kompressor.manifest")
+endif()
