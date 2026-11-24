@@ -101,8 +101,13 @@ public:
     void openCompressDialog(std::vector<std::string> inputs, bool super);
     // Extracts an archive straight to `destDir` (Explorer "Extract here" / "Extract to folder").
     void extractFile(const std::string& path, const std::string& destDir, const std::string& password = "");
-    // Close the window once every extractFile() job has succeeded (launches from the Explorer menu).
-    void quitWhenExtracted() { quitWhenExtracted_ = true; }
+    // Compresses straight to "<name>.7z/.zip/.kmp" next to the inputs with default settings (Explorer "Add to").
+    void quickCompress(const std::vector<std::string>& inputs, kz::OutFormat format);
+    // Opens an archive and shows its Extract dialog / runs its integrity test (Explorer menu).
+    void openExtractDialog(const std::string& path);
+    void testArchiveFile(const std::string& path);
+    // Close the window once every extractFile() / quickCompress() job has succeeded (Explorer menu launches).
+    void quitWhenDone() { quitWhenDone_ = true; }
     void showSettings() { showSettings_ = true; }
     // Debug aid: place the Settings dialog beside the main window (tests detached viewports).
     void debugDetach() { debugDetach_ = true; }
@@ -203,8 +208,8 @@ private:
     bool debugDetach_ = false, debugRecompress_ = false;
     std::string lastDir_;
     bool shellMenu_ = false;  // Explorer right-click menu installed
-    int directExtracts_ = 0;  // extractFile() jobs still running or waiting for a password
-    bool directFailed_ = false, quitWhenExtracted_ = false;
+    int directJobs_ = 0;  // extractFile() / quickCompress() jobs still running or waiting for a password
+    bool directFailed_ = false, quitWhenDone_ = false;
 
     struct CompressState {
         bool open = false, focus = false;

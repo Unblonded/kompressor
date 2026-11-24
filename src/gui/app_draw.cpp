@@ -184,7 +184,7 @@ const char* kMod = "Ctrl";
 void App::frame() {
     pumpJobs();
     dropTab_ = -1;  // set again by the archive view drawn this frame
-    if (quitWhenExtracted_ && directExtracts_ == 0 && !directFailed_) glfwSetWindowShouldClose(window_, 1);
+    if (quitWhenDone_ && directJobs_ == 0 && !directFailed_) glfwSetWindowShouldClose(window_, 1);
     const float em = emPx();
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);

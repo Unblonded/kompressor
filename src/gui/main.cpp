@@ -304,7 +304,16 @@ int main(int argc, char** argv) {
                     if (shellAction == "extract-to") dir /= kz::u8path(kz::stripArchiveExt(kz::fileNameOf(p)));
                     app.extractFile(p, kz::pathToUtf8(dir));
                 }
-                app.quitWhenExtracted();
+                app.quitWhenDone();
+            } else if (shellAction == "extract") {
+                for (auto& p : shellPaths) app.openExtractDialog(p);
+            } else if (shellAction == "test") {
+                for (auto& p : shellPaths) app.testArchiveFile(p);
+            } else if (shellAction == "add-7z" || shellAction == "add-zip" || shellAction == "add-kmp") {
+                app.quickCompress(shellPaths, shellAction == "add-7z"    ? kz::OutFormat::SevenZip
+                                              : shellAction == "add-zip" ? kz::OutFormat::Zip
+                                                                         : kz::OutFormat::Kmp);
+                app.quitWhenDone();
             }
         } else if (snapshotPath.empty()) {
             kzgui::shell::autoRegister();  // put Kompressor in the right-click menu unless the user turned it off

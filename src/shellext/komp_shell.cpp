@@ -28,16 +28,72 @@ const CLSID kClsid = {0x4FF8516A, 0x3A6F, 0x4DBB, {0x8C, 0xA9, 0xE6, 0x7F, 0xD2,
 HINSTANCE g_inst = nullptr;
 LONG g_objects = 0, g_locks = 0;
 
-enum Cmd { COpen, CHere, CTo, CCompress, CSuper };
-const wchar_t* const kActions[] = {L"open", L"extract-here", L"extract-to", L"compress", L"super"};
-const wchar_t* const kLabels[] = {L"Open", L"Extract here", L"Extract to folder", L"Compress...", L"Super compress..."};
-const wchar_t* const kHelp[] = {L"Browse the archive in Kompressor", L"Extract next to the archive",
-                                L"Extract into a folder named after the archive", L"Pack into a ZIP, 7Z, TAR... archive",
-                                L"Pack into Kompressor's .kmp format"};
+// The --shell actions Kompressor.exe understands (see main.cpp).
+enum Cmd { COpen, CExtract, CHere, CTo, CTest, CCompress, CSuper, CAdd7z, CAddZip, CAddKmp };
+const wchar_t* const kActions[] = {L"open", L"extract", L"extract-here", L"extract-to", L"test",
+                                   L"compress", L"super", L"add-7z", L"add-zip", L"add-kmp"};
+const wchar_t* const kHelp[] = {L"Browse the archive in Kompressor",
+                                L"Choose where to extract the archive",
+                                L"Extract next to the archive",
+                                L"Extract into a folder named after the archive",
+                                L"Check that every file in the archive decompresses correctly",
+                                L"Choose a format and options, then compress",
+                                L"Pack into Kompressor's .kmp format, with options",
+                                L"Compress into a 7z archive next to the selection",
+                                L"Compress into a ZIP archive next to the selection",
+                                L"Super compress into a .kmp archive next to the selection"};
 
 std::wstring lower(std::wstring s) {
     for (auto& c : s) c = (wchar_t)std::towlower(c);
     return s;
+}
+
+std::wstring fileName(std::wstring p) {
+    while (p.size() > 3 && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
+    size_t s = p.find_last_of(L"\\/");
+    return s == std::wstring::npos ? p : p.substr(s + 1);
+}
+
+// Name for "Extract to": the archive name without its archive extension. Same rule as kz::stripArchiveExt.
+std::wstring extractStem(const std::wstring& path) {
+    std::wstring f = fileName(path), l = lower(f);
+    for (const wchar_t* c : {L".tar.gz", L".tar.bz2", L".tar.xz", L".tar.zst", L".tar.lz4", L".tar.lzma", L".tar.lz",
+                             L".tar.z", L".tar.br"}) {
+        size_t n = wcslen(c);
+        if (l.size() > n && l.compare(l.size() - n, n, c) == 0) return f.substr(0, f.size() - n);
+    }
+    size_t d = f.find_last_of(L'.');
+    return d == std::wstring::npos || d == 0 ? f : f.substr(0, d);
+}
+
+// Name for the quick "Add to" entries. Same rule as the app's quickArchiveName(): one file -> its name
+// without the extension, one folder -> its name, several items -> the name of the folder they're in.
+std::wstring addStem(const std::vector<std::wstring>& paths) {
+    std::wstring name;
+    if (paths.size() == 1) {
+        name = fileName(paths[0]);
+        DWORD a = GetFileAttributesW(paths[0].c_str());
+        bool dir = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+        size_t d = name.find_last_of(L'.');
+        if (!dir && d != std::wstring::npos && d > 0) name.erase(d);
+    } else {
+        std::wstring p = paths[0];
+        size_t s = p.find_last_of(L"\\/");
+        if (s != std::wstring::npos) name = fileName(p.substr(0, s));
+    }
+    if (name.empty() || name.back() == L':' || name.find(L'\\') != std::wstring::npos) name = L"Archive";  // drive root
+    return name;
+}
+
+// A name for display in a menu: '&' would otherwise underline the next letter, and long names are shortened.
+std::wstring menuText(std::wstring s) {
+    if (s.size() > 48) s = s.substr(0, 45) + L"...";
+    std::wstring r;
+    for (wchar_t c : s) {
+        if (c == L'&') r += L'&';
+        r += c;
+    }
+    return r;
 }
 
 bool isArchive(const std::wstring& path) {
@@ -159,19 +215,26 @@ public:
         cmds_.clear();
         HMENU sub = CreatePopupMenu();
         UINT id = first;
-        auto add = [&](Cmd c) {
+        auto add = [&](Cmd c, const std::wstring& label) {
             if (id > last) return;
-            AppendMenuW(sub, MF_STRING, id++, kLabels[c]);
+            AppendMenuW(sub, MF_STRING, id++, label.c_str());
             cmds_.push_back(c);
         };
+        bool one = paths_.size() == 1;
         if (archives_) {
-            add(COpen);
-            add(CHere);
-            add(CTo);
+            add(COpen, L"Open archive");
+            if (one) add(CExtract, L"Extract files...");
+            add(CHere, L"Extract here");
+            add(CTo, one ? L"Extract to \"" + menuText(extractStem(paths_[0])) + L"\\\"" : L"Extract to \"*\\\"");
+            add(CTest, L"Test archive");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
         }
-        add(CCompress);
-        add(CSuper);
+        std::wstring stem = menuText(addStem(paths_));
+        add(CCompress, L"Add to archive...");
+        add(CSuper, L"Super compress...");
+        add(CAdd7z, L"Add to \"" + stem + L".7z\"");
+        add(CAddZip, L"Add to \"" + stem + L".zip\"");
+        add(CAddKmp, L"Add to \"" + stem + L".kmp\"");
 
         // Where Explorer asks: in the first group, after the other extensions' entries and above "Open with".
         int count = GetMenuItemCount(menu);

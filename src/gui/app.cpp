@@ -640,21 +640,21 @@ void App::extractFile(const std::string& path, const std::string& destDir, const
     kz::ExtractOptions o;
     o.destDir = destDir;
     o.password = password;
-    ++directExtracts_;
+    ++directJobs_;
     startJob("Extracting " + title,
         [src, o](kz::Progress& p, std::string& err) { return kz::extractArchive(src, o, p, err); },
         [this, path, o, title](Job& j) {
-            --directExtracts_;
+            --directJobs_;
             for (auto& w : j.prog->warnings()) log(col::Warn, w);
             if (j.ok) {
                 log(col::Ok, "Extracted " + title + " to " + o.destDir, "", o.destDir);
                 toast(col::Ok, "Extracted " + title);
             } else if (j.prog->needPassword) {
-                ++directExtracts_;  // still pending until the password prompt is answered
+                ++directJobs_;  // still pending until the password prompt is answered
                 askPassword(o.password.empty() ? "\"" + title + "\" is encrypted. Enter its password:"
                                                : "Wrong password for \"" + title + "\". Try again:",
                             [this, path, o](const std::string& pw) {
-                                --directExtracts_;
+                                --directJobs_;
                                 extractFile(path, o.destDir, pw);
                             });
             } else {
@@ -663,6 +663,75 @@ void App::extractFile(const std::string& path, const std::string& destDir, const
                 toast(col::Error, "Extraction failed: " + j.message);
             }
         });
+}
+
+// Name for the quick "Add to" entries; KompShell.dll's addStem() labels the menu with the same rule.
+// One file -> its name without the extension, one folder -> its name, several -> their folder's name.
+static std::string quickArchiveName(const std::vector<std::string>& inputs) {
+    namespace fs = std::filesystem;
+    std::string name;
+    if (inputs.size() == 1) {
+        std::string p = inputs[0];
+        while (p.size() > 3 && (p.back() == '/' || p.back() == '\\')) p.pop_back();
+        name = kz::fileNameOf(p);
+        std::error_code ec;
+        size_t d = name.find_last_of('.');
+        if (!fs::is_directory(kz::u8path(p), ec) && d != std::string::npos && d > 0) name.erase(d);
+    } else {
+        name = kz::fileNameOf(parentDir(inputs[0]));
+    }
+    if (name.empty() || name.back() == ':' || name.find_first_of("/\\") != std::string::npos) name = "Archive";
+    return name;
+}
+
+void App::quickCompress(const std::vector<std::string>& inputs, kz::OutFormat format) {
+    namespace fs = std::filesystem;
+    if (inputs.empty()) return;
+    const auto& fd = kz::formatDesc(format);
+    kz::CompressOptions o;
+    o.format = format;
+    o.level = format == kz::OutFormat::Kmp ? 2 : fd.defLevel;  // KMP: Ultra, the default mode
+    // Never overwrite: "name.7z" exists -> "name (2).7z", ...
+    fs::path dir = kz::u8path(commonParent(inputs));
+    std::string base = quickArchiveName(inputs);
+    fs::path out = dir / kz::u8path(base + fd.ext);
+    std::error_code ec;
+    for (int n = 2; fs::exists(out, ec); ++n) out = dir / kz::u8path(base + " (" + std::to_string(n) + ")" + fd.ext);
+    std::string outStr = kz::pathToUtf8(out);
+    auto res = std::make_shared<kz::CompressResult>();
+    ++directJobs_;
+    startJob(std::string(format == kz::OutFormat::Kmp ? "Super-compressing " : "Compressing ") + kz::fileNameOf(outStr),
+        [inputs, outStr, o, res](kz::Progress& p, std::string& err) { return kz::createArchive(inputs, outStr, o, p, *res, err); },
+        [this, res, outStr](Job& j) {
+            --directJobs_;
+            for (auto& w : j.prog->warnings()) log(col::Warn, w);
+            if (j.ok) {
+                log(col::Ok, "Created " + kz::fileNameOf(outStr) + ": " + res->summary, outStr, outStr);
+                toast(col::Ok, "Created " + kz::fileNameOf(outStr) + " - " + kz::humanSize(res->outputBytes));
+            } else {
+                directFailed_ = true;  // keep the window open so the error can be read
+                log(col::Error, "Compression failed: " + j.message);
+                toast(col::Error, "Compression failed: " + j.message);
+            }
+        });
+}
+
+void App::openExtractDialog(const std::string& path) {
+    openArchive(path);
+    for (auto& t : tabs_)
+        if (!t->src.inMemory() && t->src.path == path) {
+            actionExtract(*t, false);
+            return;
+        }
+}
+
+void App::testArchiveFile(const std::string& path) {
+    openArchive(path);
+    for (auto& t : tabs_)
+        if (!t->src.inMemory() && t->src.path == path) {
+            runTest(t->id);
+            return;
+        }
 }
 
 void App::actionTest(ExplorerTab& t) { runTest(t.id); }
