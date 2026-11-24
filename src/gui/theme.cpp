@@ -77,6 +77,60 @@ float anim(ImGuiID id, bool on, float speed) {
 
 bool animating() { return g_animating || g_animatingPrev; }
 
+// ---------------------------------------------------------------------------------------- smooth scroll
+// ImGui moves a window straight to its new scroll position when the wheel turns. Here, right after
+// NewFrame() has turned wheel input into scroll targets, those targets are taken over and the view eases
+// towards them over the next frames instead. Notches that arrive mid-glide add to where it is heading.
+namespace {
+struct ScrollGlide {
+    float target[2] = {0, 0};
+    float last[2] = {-1, -1};  // the scroll we set last frame; anything else means someone else moved it
+    bool on[2] = {false, false};
+};
+std::unordered_map<ImGuiID, ScrollGlide> g_glides;
+}  // namespace
+
+void smoothScroll() {
+    ImGuiContext& g = *GImGui;
+    float dt = std::min(g.IO.DeltaTime, 0.05f);
+    float k = 1.0f - std::exp(-dt * 16.0f);  // ~90% of the way in 0.15 s, independent of frame rate
+    for (ImGuiWindow* w : g.Windows) {
+        if (!w->WasActive) continue;
+        auto it = g_glides.find(w->ID);
+        for (int axis = 0; axis < 2; ++axis) {
+            float cur = w->Scroll[axis], max = w->ScrollMax[axis];
+            ScrollGlide* s = it == g_glides.end() ? nullptr : &it->second;
+            // The scrollbar was dragged, the content changed or code scrolled it: stop gliding.
+            if (s && s->on[axis] && std::fabs(cur - s->last[axis]) > 1.0f) s->on[axis] = false;
+            // A plain "scroll to" set during NewFrame (the wheel, Page Up/Down): glide there instead.
+            float req = w->ScrollTarget[axis];
+            if (req < FLT_MAX && w->ScrollTargetCenterRatio[axis] == 0.0f && w->ScrollTargetEdgeSnapDist[axis] == 0.0f) {
+                if (!s) {
+                    it = g_glides.emplace(w->ID, ScrollGlide()).first;
+                    s = &it->second;
+                }
+                float from = s->on[axis] ? s->target[axis] : cur;
+                s->target[axis] = std::clamp(from + (req - cur), 0.0f, max);
+                s->on[axis] = true;
+                w->ScrollTarget[axis] = FLT_MAX;
+            }
+            if (!s || !s->on[axis]) continue;
+            float t = std::min(s->target[axis], max);
+            float next = cur + (t - cur) * k;
+            if (std::fabs(t - next) < 1.0f) {
+                next = t;
+                s->on[axis] = false;
+            } else {
+                g_animating = true;  // keep frames coming until it settles
+            }
+            if (axis == 0) ImGui::SetScrollX(w, next);
+            else ImGui::SetScrollY(w, next);
+            s->last[axis] = std::round(std::max(0.0f, std::min(next, max)));  // as ImGui will apply it
+        }
+        if (it != g_glides.end() && !it->second.on[0] && !it->second.on[1]) g_glides.erase(it);
+    }
+}
+
 void beginFrameUi() {
     g_animatingPrev = g_animating;
     g_animating = false;

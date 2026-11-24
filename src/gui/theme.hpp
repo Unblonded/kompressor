@@ -57,6 +57,8 @@ float anim(ImGuiID id, bool on, float speed = 14.0f);
 // True while any animation is still moving: the app keeps rendering until it settles.
 bool animating();
 void beginFrameUi();
+// Call right after ImGui::NewFrame(): turns wheel jumps into an eased glide.
+void smoothScroll();
 
 // ------------------------------------------------------------------ icons
 enum class Ico {

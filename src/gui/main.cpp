@@ -339,6 +339,7 @@ int main(int argc, char** argv) {
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
             kzgui::beginFrameUi();
+            kzgui::smoothScroll();
             app.frame();
             ImGui::Render();
             int w, h;
@@ -384,8 +385,9 @@ int main(int argc, char** argv) {
         };
         int settleFrames = 0;
         while (!glfwWindowShouldClose(window)) {
-            // Sleep while idle; tick quickly only while work is running or animating.
-            if (settleFrames > 0) glfwPollEvents();
+            // Sleep while idle. Animations (scrolling, hovers, toasts) draw every frame at the display's
+            // refresh rate (vsync paces the loop); background work alone only needs ~30 updates a second.
+            if (settleFrames > 0 || kzgui::animating()) glfwPollEvents();
             else if (app.busy()) glfwWaitEventsTimeout(1.0 / 30.0);
             else glfwWaitEventsTimeout(0.5);
             renderFrame();
