@@ -27,6 +27,7 @@
 #include "shell_integration.hpp"
 #include "kmp.hpp"
 #include "kz_archive.hpp"
+#include "native_files.hpp"
 #include "theme.hpp"
 #include "window_frame.hpp"
 
@@ -34,11 +35,16 @@ namespace {
 
 kzgui::App* g_app = nullptr;
 
-void onDrop(GLFWwindow*, int count, const char** paths) {
+void onDrop(GLFWwindow* w, int count, const char** paths) {
     if (!g_app) return;
     std::vector<std::string> v;
     for (int i = 0; i < count; ++i) v.emplace_back(paths[i]);  // GLFW hands out UTF-8 on every platform
-    g_app->onDrop(v);
+    // Where the files landed, in ImGui coordinates (screen coordinates when viewports are enabled).
+    double cx = 0, cy = 0;
+    glfwGetCursorPos(w, &cx, &cy);
+    int wx = 0, wy = 0;
+    if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) glfwGetWindowPos(w, &wx, &wy);
+    g_app->onDrop(v, ImVec2((float)(wx + cx), (float)(wy + cy)));
 }
 
 void onError(int code, const char* msg) { std::fprintf(stderr, "GLFW error %d: %s\n", code, msg); }
@@ -247,6 +253,7 @@ int main(int argc, char** argv) {
     }
     glfwSetWindowContentScaleCallback(window, [](GLFWwindow*, float x, float) { g_pendingScale = x; });
 
+    kzgui::native::init();  // OLE: dragging files out, file clipboard
     {
         kzgui::App app(window, mono, uiScale);
         g_app = &app;
@@ -358,6 +365,7 @@ int main(int argc, char** argv) {
             else if (app.busy()) glfwWaitEventsTimeout(1.0 / 30.0);
             else glfwWaitEventsTimeout(0.5);
             renderFrame();
+            app.afterFrame();
             if (unsettled()) settleFrames = 3;
             else if (settleFrames > 0) --settleFrames;
         }
@@ -365,6 +373,7 @@ int main(int argc, char** argv) {
         g_render = nullptr;
         g_app = nullptr;
     }
+    kzgui::native::shutdown();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

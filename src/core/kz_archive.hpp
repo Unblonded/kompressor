@@ -104,6 +104,23 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
 bool convertArchive(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
                     Progress& prog, CompressResult& res, std::string& err);
 
+// A change to an existing archive: entries to drop and files from disk to add.
+struct ArchiveEdit {
+    std::vector<std::string> remove;  // archive paths; each entry and everything below it is dropped
+    std::vector<std::string> add;     // files / folders on disk (an entry with the same path is replaced)...
+    std::string addUnder;             // ...placed in this archive folder ("" = the top level)
+};
+
+// Whether Kompressor can write `src` back (a file on disk in a format it can create, not split into
+// volumes). `why` explains a refusal.
+bool canEditArchive(const Source& src, std::string& why);
+
+// Applies `edit` in place. The archive is rewritten in its own format into a temporary file that
+// replaces it at the end, so every entry is recompressed (RAR comes back stored). `password` is the
+// archive's password when it is encrypted; ZIP keeps it, other formats refuse.
+bool editArchive(const Source& src, const ArchiveEdit& edit, const std::string& password, Progress& prog,
+                 CompressResult& res, std::string& err);
+
 std::string libraryVersions();
 
 }  // namespace kz

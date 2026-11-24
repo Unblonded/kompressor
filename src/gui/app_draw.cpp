@@ -11,6 +11,7 @@
 #include "app.hpp"
 #include "app_util.hpp"
 #include "kmp.hpp"
+#include "native_files.hpp"
 #include "theme.hpp"
 #include "shell_integration.hpp"
 #include "window_frame.hpp"
@@ -182,6 +183,7 @@ const char* kMod = "Ctrl";
 // ============================================================================ frame
 void App::frame() {
     pumpJobs();
+    dropTab_ = -1;  // set again by the archive view drawn this frame
     if (quitWhenExtracted_ && directExtracts_ == 0 && !directFailed_) glfwSetWindowShouldClose(window_, 1);
     const float em = emPx();
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -286,6 +288,7 @@ void App::frame() {
     drawAbout();
     drawSettings();
     drawPasswordPopup();
+    drawConfirmPopup();
     fileDlg_.draw();
     if (std::string e = fileDlg_.takeError(); !e.empty()) {
         log(col::Error, e);
@@ -372,6 +375,17 @@ void App::drawMenuBar() {
         if (ImGui::MenuItem("Extract All...")) actionExtract(*at, false);
         if (ImGui::MenuItem("Extract Selected...", nullptr, false, !at->selection.empty())) actionExtract(*at, true);
         if (ImGui::MenuItem("Test Integrity")) actionTest(*at);
+        ImGui::Separator();
+        bool canEdit = at->editable && !at->editing;
+        if (ImGui::MenuItem("Add Files...", nullptr, false, canEdit)) pickFilesToAdd(*at, false);
+        if (ImGui::MenuItem("Add Folder...", nullptr, false, canEdit)) pickFilesToAdd(*at, true);
+        if (native::fileTransferSupported()) {
+            std::string kC = std::string(kMod) + "+C", kV = std::string(kMod) + "+V";
+            if (ImGui::MenuItem("Copy Selected", kC.c_str(), false, !at->selection.empty())) copySelection(*at);
+            if (ImGui::MenuItem("Paste Files", kV.c_str(), false, canEdit)) pasteFiles(*at);
+        }
+        if (ImGui::MenuItem("Delete Selected", "Del", false, canEdit && !at->selection.empty())) askDeleteSelection(*at);
+        if (!at->editable && !at->editWhy.empty()) ImGui::SetItemTooltip("%s", at->editWhy.c_str());
         ImGui::Separator();
         if (ImGui::MenuItem("Recompress As...")) actionConvert(*at);
         if (ImGui::MenuItem("Super Compress to .kmp...")) actionConvert(*at, true);
@@ -503,6 +517,19 @@ void App::drawToolbar() {
         ImGui::SameLine(0, sp);
         if (ghostButton("Test", Ico::Shield, ImVec2(0, bh))) actionTest(*at);
         ImGui::SetItemTooltip("Decompress everything in memory and verify checksums");
+        if (at->editable) {
+            ImGui::SameLine(0, em * 0.9f);
+            ImVec2 sp1 = ImGui::GetCursorScreenPos();
+            dl->AddLine(ImVec2(sp1.x, p0.y + h * 0.28f), ImVec2(sp1.x, p0.y + h * 0.72f), u32(col::Line), 1.0f);
+            ImGui::Dummy(ImVec2(1, bh));
+            ImGui::SameLine(0, em * 0.9f);
+            if (ghostButton("Add", Ico::Plus, ImVec2(0, bh), true, !at->editing)) pickFilesToAdd(*at, false);
+            ImGui::SetItemTooltip("Add files to the folder you're in (or drop them onto the list)");
+            ImGui::SameLine(0, sp);
+            if (ghostButton("Delete", Ico::Trash, ImVec2(0, bh), true, !at->editing && !at->selection.empty()))
+                askDeleteSelection(*at);
+            ImGui::SetItemTooltip("Remove the selected entries from the archive (Del)");
+        }
     }
 
     // right: settings + activity toggle
@@ -875,7 +902,19 @@ void App::drawExplorer(ExplorerTab& t) {
     float previewPx = std::clamp(std::floor(avail.x * t.previewWidth), em * 16, std::max(em * 16, avail.x - em * 22));
     float split = em * 0.7f;
     float tableW = avail.x - previewPx - split;
+    {
+        // Files dropped anywhere on the list or preview are added to this archive.
+        ImVec2 a = ImGui::GetCursorScreenPos();
+        dropTab_ = t.id;
+        dropMin_ = a;
+        dropMax_ = ImVec2(a.x + avail.x, a.y + avail.y);
+    }
+    if (t.editing) {
+        // An update is rewriting the archive: show it over the list, and keep hands off meanwhile.
+        ImGui::BeginDisabled();
+    }
     drawTable(t, tableW);
+    if (t.editing) ImGui::EndDisabled();
     ImGui::SameLine(0, 0);
     ImGui::InvisibleButton("##split", ImVec2(split, avail.y));
     bool sh = ImGui::IsItemHovered() || ImGui::IsItemActive();
@@ -980,6 +1019,16 @@ void App::drawTable(ExplorerTab& t, float width) {
                     else openFile = id;
                 }
             }
+            // Pulling a row out starts a drag of the selection to the file manager (after this frame).
+            if (!dragging_ && !t.editing && native::fileTransferSupported() && ImGui::IsItemActive() &&
+                ImGui::IsMouseDragging(ImGuiMouseButton_Left, em * 0.6f)) {
+                if (!sel) {
+                    t.selection = {id};
+                    t.anchor = r;
+                }
+                pendingDrag_ = t.id;
+                ImGui::ClearActiveID();  // the row must not see the release as a click
+            }
             bool hov = ImGui::IsItemHovered();
             sel = t.selection.count(id) > 0;
             {
@@ -1002,10 +1051,16 @@ void App::drawTable(ExplorerTab& t, float width) {
             }
             if (ImGui::BeginPopupContextItem("##ctx")) {
                 if (!sel) t.selection = {id};
-                if (ImGui::MenuItem("Extract...")) actionExtract(t, true);
-                if (!n.isDir && ImGui::MenuItem("Preview")) requestPreview(t, id);
-                if (!n.isDir && ImGui::MenuItem("Open as archive", nullptr, false, true)) openNested(t, id);
                 if (n.isDir && ImGui::MenuItem("Open folder")) openDir = id;
+                if (!n.isDir && ImGui::MenuItem("Open")) openEntry(t, id);
+                if (!n.isDir && ImGui::MenuItem("Open as archive")) openNested(t, id);
+                if (!n.isDir && ImGui::MenuItem("Preview")) requestPreview(t, id);
+                ImGui::Separator();
+                if (ImGui::MenuItem("Extract...")) actionExtract(t, true);
+                std::string kC = std::string(kMod) + "+C";
+                if (native::fileTransferSupported() && ImGui::MenuItem("Copy", kC.c_str())) copySelection(t);
+                if (ImGui::MenuItem("Delete", "Del", false, t.editable && !t.editing)) askDeleteSelection(t);
+                if (!t.editable && !t.editWhy.empty()) ImGui::SetItemTooltip("%s", t.editWhy.c_str());
                 ImGui::Separator();
                 if (ImGui::MenuItem("Copy path")) ImGui::SetClipboardText(n.path.c_str());
                 ImGui::EndPopup();
@@ -1050,6 +1105,28 @@ void App::drawTable(ExplorerTab& t, float width) {
             ImGui::PopID();
         }
     }
+    // Right-click on the empty part of the list: add or paste into this folder.
+    if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+        ImGui::OpenPopup("##bgctx");
+    if (ImGui::BeginPopup("##bgctx")) {
+        bool canEdit = t.editable && !t.editing;
+        if (ImGui::MenuItem("Add Files...", nullptr, false, canEdit)) pickFilesToAdd(t, false);
+        if (ImGui::MenuItem("Add Folder...", nullptr, false, canEdit)) pickFilesToAdd(t, true);
+        if (native::fileTransferSupported()) {
+            std::string kV = std::string(kMod) + "+V";
+            if (ImGui::MenuItem("Paste", kV.c_str(), false, canEdit)) pasteFiles(t);
+        }
+        if (!t.editable && !t.editWhy.empty()) {
+            ImGui::Separator();
+            ImGui::PushTextWrapPos(em * 22);
+            ImGui::TextColored(col::Dim, "%s", t.editWhy.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Select All", (std::string(kMod) + "+A").c_str()))
+            t.selection = std::set<int>(t.rows.begin(), t.rows.end());
+        ImGui::EndPopup();
+    }
     ImGui::EndTable();
     ImGui::PopStyleColor(4);
     ImGui::SetCursorScreenPos(a);  // report the card (not the inset table) as this item for SameLine()
@@ -1073,12 +1150,19 @@ void App::drawTable(ExplorerTab& t, float width) {
         }
         if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_A, ImGuiInputFlags_RouteGlobal))
             t.selection = std::set<int>(t.rows.begin(), t.rows.end());
+        if (!t.editing) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !t.selection.empty() && t.editable) askDeleteSelection(t);
+            if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, ImGuiInputFlags_RouteGlobal) && !t.selection.empty()) copySelection(t);
+            if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_V, ImGuiInputFlags_RouteGlobal) && native::fileTransferSupported())
+                pasteFiles(t);
+        }
     }
     if (openDir >= 0) {
         navigateTo(t, openDir);
     } else if (openFile >= 0) {
+        // Archives inside the archive open as a new tab; anything else opens in its usual app.
         if (kz::looksLikeArchive(t.nodes[openFile].name)) openNested(t, openFile);
-        else requestPreview(t, openFile);
+        else openEntry(t, openFile);
     }
 }
 
@@ -1197,7 +1281,10 @@ void App::drawPreview(ExplorerTab& t) {
         ImGui::Dummy(ImVec2(0, em * 0.5f));
         ImGui::PushFont(fonts().caption);
         ImGui::PushStyleColor(ImGuiCol_Text, col::Faint);
-        ImGui::TextWrapped("Select a file to preview it. Double-click a folder to open it, or a nested archive to explore it.");
+        ImGui::TextWrapped("%s", t.editable
+                                     ? "Select a file to preview it, double-click to open it. Drag files out to copy them, "
+                                       "or drop files onto the list to add them."
+                                     : "Select a file to preview it, double-click to open it. Drag files out to copy them.");
         ImGui::PopStyleColor();
         ImGui::PopFont();
         ImGui::EndChild();
@@ -1219,12 +1306,18 @@ void App::drawPreview(ExplorerTab& t) {
     ImGui::PopFont();
     ImGui::EndGroup();
     ImGui::Dummy(ImVec2(0, em * 0.3f));
+    if (ghostButton("Open", Ico::Open, ImVec2(0, ImGui::GetFrameHeight()))) openEntry(t, nid);
+    ImGui::SetItemTooltip("Open in its usual app (double-click does the same)");
+    ImGui::SameLine(0, em * 0.2f);
     if (ghostButton("Extract", Ico::Extract, ImVec2(0, ImGui::GetFrameHeight()))) {
         t.selection = {nid};
         actionExtract(t, true);
     }
-    ImGui::SameLine(0, em * 0.2f);
-    if (ghostButton("Open as archive", Ico::Archive, ImVec2(0, ImGui::GetFrameHeight()))) openNested(t, nid);
+    if (kz::looksLikeArchive(n.name)) {
+        ImGui::SameLine(0, em * 0.2f);
+        if (ghostButton("Explore", Ico::Archive, ImVec2(0, ImGui::GetFrameHeight()))) openNested(t, nid);
+        ImGui::SetItemTooltip("Open this archive in a new tab");
+    }
     {
         static const char* modes[] = {"Auto", "Text", "Hex"};
         ImGui::PushFont(fonts().caption);

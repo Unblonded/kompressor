@@ -161,8 +161,10 @@ if(KOMPRESSOR_BUILD_GUI)
     src/gui/main.cpp
     src/gui/app.cpp
     src/gui/app_draw.cpp
+    src/gui/app_files.cpp
     src/gui/app_icon.cpp
     src/gui/file_dialog.cpp
+    src/gui/native_files.cpp
     src/gui/shell_integration.cpp
     src/gui/theme.cpp
     src/gui/window_frame.cpp)

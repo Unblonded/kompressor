@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <functional>
+#include <unordered_set>
 
 #include "kmp.hpp"
 #include "kz_archive.hpp"
@@ -60,6 +62,45 @@ std::string ratioText(uint64_t in, uint64_t out) {
     double r = in ? 100.0 * double(out) / double(in) : 0.0;
     std::snprintf(buf, sizeof buf, "%s -> %s (%.1f%% of original)", humanSize(in).c_str(), humanSize(out).c_str(), r);
     return buf;
+}
+
+// An in-place edit while re-packing: source entries to leave out and files from disk to append.
+struct EditPlan {
+    std::vector<std::string> remove;
+    std::vector<InputItem> add;  // arcPath already includes the target folder
+    std::unordered_set<std::string> added;
+    uint64_t addBytes = 0;
+    bool drops(const std::string& p) const {
+        if (added.count(p)) return true;  // replaced by a file being added
+        for (auto& r : remove)
+            if (p == r || (p.size() > r.size() && p.compare(0, r.size(), r) == 0 && p[r.size()] == '/')) return true;
+        return false;
+    }
+};
+
+// Copies exactly `size` bytes of an open file into `put` (cut short, or zero-padded if the file changed
+// since it was scanned) so writers that announced the size in a header stay consistent.
+bool pumpFile(std::ifstream& in, uint64_t size, std::vector<char>& buf, Progress& prog,
+              const std::function<bool(const char*, size_t)>& put) {
+    uint64_t left = size;
+    while (left && in) {
+        in.read(buf.data(), (std::streamsize)std::min<uint64_t>(left, buf.size()));
+        std::streamsize n = in.gcount();
+        if (n <= 0) break;
+        if (!put(buf.data(), (size_t)n)) return false;
+        left -= (uint64_t)n;
+        prog.done += (uint64_t)n;
+        if (prog.cancelled()) return false;
+    }
+    if (left) {
+        std::fill(buf.begin(), buf.end(), char(0));
+        while (left) {
+            size_t k = (size_t)std::min<uint64_t>(left, buf.size());
+            if (!put(buf.data(), k)) return false;
+            left -= k;
+        }
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------- KMP from disk
@@ -578,14 +619,16 @@ static bool createWhole(const std::vector<std::string>& inputs, const std::strin
     return createLibarchive(items, outPath, opt, prog, res, err);
 }
 
-bool convertToKmp(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
-                  Progress& prog, CompressResult& res, std::string& err) {
+static bool convertToKmpImpl(const Source& src, const std::string& outPath, const CompressOptions& opt,
+                             const std::string& password, Progress& prog, CompressResult& res, std::string& err,
+                             const EditPlan* plan) {
     res = CompressResult();
+    const uint64_t addBytes = plan ? plan->addBytes : 0;
     kmp::Options ko;
     ko.mode = (kmp::Mode)std::clamp(opt.level < 0 ? 2 : opt.level, 0, 5);
     ko.threads = opt.threads;
     ko.dedup = opt.dedup;
-    ko.sizeHint = sourceSize(src) * 2;  // a rough guess at the unpacked size
+    ko.sizeHint = sourceSize(src) * 2 + addBytes;  // a rough guess at the unpacked size
     std::string tmp = tmpPathFor(outPath);
     kmp::Writer w;
     w.setProgress(&prog);
@@ -600,10 +643,12 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
         }
         r.setSequential();
         uint64_t total = 0;
-        for (auto& e : r.entries()) total += e.size;
-        prog.total = total;
+        for (auto& e : r.entries())
+            if (!(plan && plan->drops(e.path))) total += e.size;
+        prog.total = total + addBytes;
         for (size_t i = 0; i < r.entries().size(); ++i) {
             const auto& e = r.entries()[i];
+            if (plan && plan->drops(e.path)) continue;
             if (e.type == kmp::EntryType::Dir) w.addDir(e.path, e.mode, e.mtime);
             else if (e.type == kmp::EntryType::Symlink) w.addSymlink(e.path, e.link, e.mode, e.mtime);
             else {
@@ -637,7 +682,7 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
             w.abort();
             return false;
         }
-        prog.total = sourceSize(src);
+        prog.total = sourceSize(src) + addBytes;
         archive_entry* e;
         std::vector<char> buf(1 << 20);
         while ((rc = archive_read_next_header(a, &e)) == ARCHIVE_OK || rc == ARCHIVE_WARN) {
@@ -649,6 +694,7 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
                 if (pn) prog.warn("Skipped unsafe path: " + std::string(pn));
                 continue;
             }
+            if (plan && plan->drops(path)) continue;
             uint32_t mode = (uint32_t)archive_entry_perm(e);
             int64_t mt = archive_entry_mtime(e);
             auto ft = archive_entry_filetype(e);
@@ -686,6 +732,39 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
             w.abort();
             return false;
         }
+        prog.done = sourceSize(src);
+    }
+    if (plan) {
+        std::vector<char> buf(kIoBuf);
+        for (auto& it : plan->add) {
+            if (prog.cancelled()) {
+                err = "Cancelled";
+                w.abort();
+                return false;
+            }
+            if (it.isDir) {
+                w.addDir(it.arcPath, it.mode, it.mtime);
+                continue;
+            }
+            if (it.isSymlink) {
+                w.addSymlink(it.arcPath, it.linkTarget, it.mode, it.mtime);
+                continue;
+            }
+            std::ifstream in(it.source, std::ios::binary);
+            if (!in) {
+                prog.warn("Cannot read " + pathToUtf8(it.source) + " (skipped)");
+                continue;
+            }
+            prog.setStatus(it.arcPath);
+            w.beginFile(it.arcPath, it.mode, it.mtime);
+            bool ok = pumpFile(in, it.size, buf, prog, [&](const char* p, size_t n) { return w.write(p, n); });
+            if (!ok || !w.endFile()) {
+                err = prog.cancelled() ? "Cancelled" : w.error();
+                w.abort();
+                return false;
+            }
+            res.inputBytes += it.size;
+        }
     }
     if (!w.finish(err)) return false;
     if (!commitTemp(tmp, outPath, err)) return false;
@@ -693,6 +772,11 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
     res.outputBytes = fileSize(outPath);
     res.summary = w.stats().summary();
     return true;
+}
+
+bool convertToKmp(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
+                  Progress& prog, CompressResult& res, std::string& err) {
+    return convertToKmpImpl(src, outPath, opt, password, prog, res, err, nullptr);
 }
 
 namespace {
@@ -823,15 +907,16 @@ private:
 }  // namespace
 
 static bool convertWhole(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
-                    Progress& prog, CompressResult& res, std::string& err) {
-    if (opt.format == OutFormat::Kmp) return convertToKmp(src, outPath, opt, password, prog, res, err);
+                    Progress& prog, CompressResult& res, std::string& err, const EditPlan* plan = nullptr) {
+    if (opt.format == OutFormat::Kmp) return convertToKmpImpl(src, outPath, opt, password, prog, res, err, plan);
     res = CompressResult();
+    const uint64_t addBytes = plan ? plan->addBytes : 0;
     const FormatDesc& fd = formatDesc(opt.format);
     if (!opt.password.empty() && !fd.password) {
         err = std::string(fd.name) + " does not support passwords - use ZIP for encryption";
         return false;
     }
-    if (!src.inMemory()) {  // never overwrite the archive we are reading from
+    if (!plan && !src.inMemory()) {  // never overwrite the archive we are reading from (edits replace it at the end)
         std::error_code e1, e2;
         if (fs::weakly_canonical(u8path(src.path), e1) == fs::weakly_canonical(u8path(outPath), e2)) {
             err = "The output file is the archive being converted - choose another name";
@@ -840,7 +925,7 @@ static bool convertWhole(const Source& src, const std::string& outPath, const Co
     }
 
     std::string tmp = tmpPathFor(outPath);
-    uint64_t hint = sourceSize(src) * 2;  // rough unpacked size, to size the parallel work units
+    uint64_t hint = sourceSize(src) * 2 + addBytes;  // rough unpacked size, to size the parallel work units
     const bool is7z = writesDirectly(opt.format);
     std::unique_ptr<ArchiveWriter> direct;
     LaOutput lo;
@@ -873,8 +958,9 @@ static bool convertWhole(const Source& src, const std::string& outPath, const Co
         } else {
             r.setSequential();
             uint64_t total = 0;
-            for (auto& e : r.entries()) total += e.size;
-            prog.total = total;
+            for (auto& e : r.entries())
+                if (!(plan && plan->drops(e.path))) total += e.size;
+            prog.total = total + addBytes;
             prog.done = 0;
             for (size_t i = 0; ok && i < r.entries().size(); ++i) {
                 if (prog.cancelled()) {
@@ -882,6 +968,7 @@ static bool convertWhole(const Source& src, const std::string& outPath, const Co
                     break;
                 }
                 const auto& ke = r.entries()[i];
+                if (plan && plan->drops(ke.path)) continue;
                 ConvEntry ce;
                 ce.path = ke.path;
                 ce.mode = ke.mode;
@@ -915,7 +1002,7 @@ static bool convertWhole(const Source& src, const std::string& outPath, const Co
         if (rc != ARCHIVE_OK) {
             fail(archive_error_string(a) ? archive_error_string(a) : "cannot open source archive");
         } else {
-            prog.total = sourceSize(src);
+            prog.total = sourceSize(src) + addBytes;
             prog.done = 0;
             archive_entry* e;
             std::vector<char> buf(kIoBuf);
@@ -931,6 +1018,7 @@ static bool convertWhole(const Source& src, const std::string& outPath, const Co
                     if (pn) prog.warn("Skipped unsafe path: " + std::string(pn));
                     continue;
                 }
+                if (plan && plan->drops(ce.path)) continue;
                 if (archive_entry_hardlink(e)) {
                     prog.warn(ce.path + ": hard link skipped");
                     continue;
@@ -1008,8 +1096,49 @@ static bool convertWhole(const Source& src, const std::string& outPath, const Co
             }
             if (ok && prog.cancelled()) fail("Cancelled");
             if (ok && rc != ARCHIVE_EOF) fail(archive_error_string(a) ? archive_error_string(a) : "read error");
+            prog.done = sourceSize(src);
         }
         archive_read_free(a);
+    }
+
+    if (ok && plan) {  // files being added go after the kept entries
+        std::vector<char> buf(kIoBuf);
+        for (auto& it : plan->add) {
+            if (prog.cancelled()) {
+                fail("Cancelled");
+                break;
+            }
+            ConvEntry ce;
+            ce.path = it.arcPath;
+            ce.mode = it.mode;
+            ce.mtime = it.mtime;
+            std::ifstream in;
+            if (it.isDir) {
+                ce.type = 1;
+            } else if (it.isSymlink) {
+                ce.type = 2;
+                ce.link = it.linkTarget;
+            } else {
+                in.open(it.source, std::ios::binary);
+                if (!in) {
+                    prog.warn("Cannot read " + pathToUtf8(it.source) + " (skipped)");
+                    continue;
+                }
+                ce.size = it.size;
+            }
+            bool skip = false;
+            if (!cw.begin(ce, skip, err)) {
+                ok = false;
+                break;
+            }
+            if (ce.type != 0) continue;
+            prog.setStatus(ce.path);
+            if (!pumpFile(in, it.size, buf, prog, [&](const char* p, size_t n) { return skip || cw.write(p, n, err); })) {
+                fail(prog.cancelled() ? "Cancelled" : "write failed");
+                break;
+            }
+            res.inputBytes += it.size;
+        }
     }
 
     if (ok && fd.singleFile && cw.files() == 0) fail(std::string(fd.name) + " needs a file to compress, but the archive has none");
@@ -1060,6 +1189,86 @@ bool createArchive(const std::vector<std::string>& inputs, const std::string& ou
 bool convertArchive(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
                     Progress& prog, CompressResult& res, std::string& err) {
     return convertWhole(src, outPath, opt, password, prog, res, err) && finishOutput(outPath, opt, prog, res, err);
+}
+
+static std::string lowerStr(std::string s) {
+    for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+bool canEditArchive(const Source& src, std::string& why) {
+    if (src.inMemory()) {
+        why = "This archive is inside another archive. Extract it first to change it.";
+        return false;
+    }
+    if (kmp::isKmp(src)) return true;
+    std::string name = lowerStr(fileNameOf(src.path));
+    OutFormat f;
+    if (!formatFromFileName(name, f)) {
+        why = "Kompressor can't write this kind of archive (or it is split into parts), so it can't be changed.";
+        return false;
+    }
+    if (formatDesc(f).singleFile) {
+        why = std::string(formatDesc(f).name) + " holds a single compressed file, so nothing can be added to it.";
+        return false;
+    }
+    // "name.part2.rar": one volume of a multi-volume RAR set
+    size_t p = name.rfind(".part");
+    if (f == OutFormat::Rar && p != std::string::npos && p + 5 < name.size() && std::isdigit((unsigned char)name[p + 5])) {
+        why = "This archive is split into parts, so it can't be changed.";
+        return false;
+    }
+    return true;
+}
+
+bool editArchive(const Source& src, const ArchiveEdit& edit, const std::string& password, Progress& prog,
+                 CompressResult& res, std::string& err) {
+    res = CompressResult();
+    if (!canEditArchive(src, err)) return false;
+    EditPlan plan;
+    for (auto& r : edit.remove) {
+        std::string c;
+        if (sanitizeRelativePath(r, c) && !c.empty()) plan.remove.push_back(c);
+    }
+    std::string under;
+    if (!edit.addUnder.empty() && !sanitizeRelativePath(edit.addUnder, under)) {
+        err = "Invalid folder: " + edit.addUnder;
+        return false;
+    }
+    if (!edit.add.empty()) {
+        if (!gatherInputs(edit.add, plan.add, prog, err)) return false;
+        std::error_code ec;
+        fs::path self = fs::weakly_canonical(u8path(src.path), ec);
+        plan.add.erase(std::remove_if(plan.add.begin(), plan.add.end(), [&](const InputItem& i) {
+                           std::error_code e2;
+                           return fs::weakly_canonical(i.source, e2) == self;  // never pack the archive into itself
+                       }),
+                       plan.add.end());
+        for (auto& it : plan.add) {
+            if (!under.empty()) it.arcPath = under + "/" + it.arcPath;
+            plan.added.insert(it.arcPath);
+            if (!it.isDir && !it.isSymlink) plan.addBytes += it.size;
+        }
+    }
+    CompressOptions opt;
+    if (kmp::isKmp(src)) {
+        kmp::Reader r;
+        if (!r.open(src, err)) return false;
+        opt.format = OutFormat::Kmp;
+        opt.level = (int)r.mode();
+    } else {
+        formatFromFileName(lowerStr(fileNameOf(src.path)), opt.format);
+        if (!password.empty()) {
+            if (!formatDesc(opt.format).password) {
+                err = std::string("Kompressor can't write encrypted ") + formatDesc(opt.format).name +
+                      " archives, so this one can't be changed without losing its password.";
+                return false;
+            }
+            opt.password = password;
+        }
+    }
+    prog.setStatus("Updating " + src.name());
+    return convertWhole(src, src.path, opt, password, prog, res, err, &plan);
 }
 
 }  // namespace kz

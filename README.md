@@ -6,6 +6,7 @@ A cross-platform (Windows · macOS · Linux) file compressor written in C++17 wi
 * **Compresses into standard formats**: ZIP (optionally AES-256), 7Z, TAR, TAR.GZ/BZ2/XZ/ZST/LZ4, single-file GZ/BZ2/XZ/ZST/LZ4, ISO and CPIO.
 * **Super Compresses** into its own `.kmp` format (see below).
 * **Lets you browse an archive without extracting it**: a folder tree, search, a text/hex preview, extraction of selected items, and nested archives (a `.tar.gz` inside a `.zip` inside a `.deb`…) that open in memory.
+* **Works with files inside archives like a folder**: double-click a file to open it in its usual app, drag files out to the desktop or Explorer (or Ctrl+C them), and drop files onto an open archive (or Ctrl+V, or Add) to add them to the folder you're in. Delete removes entries. Edited archives are rewritten in their own format (KMP keeps its mode, encrypted ZIPs keep their password).
 * Integrity **Test**, password prompts, background jobs you can cancel, drag & drop.
 * A scriptable `kompressor-cli` built from the same core.
 
@@ -103,6 +104,8 @@ kompressor-cli create  out.7z|.zip|.tar.xz|... <files/folders> [-l level] [-p pw
 kompressor-cli super   out.kmp <files/folders> [-m fast|balanced|ultra|max|extreme|ultimate] [--no-dedup]
 kompressor-cli convert <any-archive> out.7z|.zip|.tar.zst|.kmp|... [-l level] [-m mode] [-p pw] [-e new-pw]
                                                      # re-pack into another format without temp files
+kompressor-cli add     <archive> <files/folders> [-d folder-in-archive] [-p pw]   # add or replace entries
+kompressor-cli delete  <archive> <entry...> [-p pw]                               # remove entries / folders
 kompressor-cli formats
 
 # create, super and convert take -v <size> to split the output into .001, .002 ... parts
@@ -121,5 +124,6 @@ src/gui/    main (GLFW/GL/fonts/HiDPI), app (explorer, preview, dialogs, jobs), 
 ## Notes & limits
 
 * RAR files are created as genuine RAR5 archives with stored (uncompressed) data, written from RARLAB's published format description; RAR's compression algorithm is proprietary, so it is not used. 7-Zip archives with *encrypted headers* are not supported by libarchive. Encrypted ZIPs work both ways.
+* Adding to or deleting from an archive rewrites the whole archive (every entry is recompressed), so it takes about as long as recompressing it. A RAR comes back stored, single-file formats (GZ, XZ, ...), split sets and archives nested inside other archives can't be edited, and encrypted 7z/RAR archives can't be written back. Files opened from an archive are temporary copies in `%TEMP%\Kompressor` (cleaned up after a day); edits to them don't go back into the archive. Dragging and copying files out is Windows-only for now.
 * Extraction is hardened against path traversal: `..` entries, absolute paths and paths that resolve through symlinks are refused.
 * Debug aid: `Kompressor --snapshot out.ppm [--select entry/path] archive` renders the UI, saves a frame and exits.

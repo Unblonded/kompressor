@@ -71,6 +71,12 @@ struct ExplorerTab {
     std::shared_ptr<kz::Progress> previewProg;
     int previewMode = 0;  // 0 auto, 1 text, 2 hex
     float previewWidth = 0.0f;  // fraction of the explorer width
+    // editing (adding / deleting entries)
+    bool editable = false;      // Kompressor can write this archive back
+    std::string editWhy;        // why not, when it can't
+    bool editing = false;       // an update is running
+    std::string restoreDir;     // after a reload: folder to return to...
+    std::vector<std::string> restoreSelect;  // ...and entries to select
 };
 
 struct LogEntry {
@@ -86,7 +92,10 @@ public:
     App(GLFWwindow* window, ImFont* mono, float scale);
     ~App();
     void frame();
-    void onDrop(const std::vector<std::string>& paths);
+    // Work that must run outside a frame (dragging files out of the window). Called after each frame.
+    void afterFrame();
+    // Files dropped onto the window at screen position `at`.
+    void onDrop(const std::vector<std::string>& paths, ImVec2 at);
     void openArchive(const std::string& path);
     void openCompressDialog(std::vector<std::string> inputs, bool super);
     // Extracts an archive straight to `destDir` (Explorer "Extract here" / "Extract to folder").
@@ -123,6 +132,24 @@ private:
     void navigateTo(ExplorerTab& t, int dir, int select = -1, bool record = true);
     void goBack(ExplorerTab& t);
     void goForward(ExplorerTab& t);
+
+    // files in and out of archives (app_files.cpp)
+    void openEntry(ExplorerTab& t, int node);       // extract to a temp folder, open in its default app
+    void copySelection(ExplorerTab& t);             // extract to a temp folder, put on the clipboard
+    void pasteFiles(ExplorerTab& t);                // add the clipboard's files to the open folder
+    void askAddFiles(ExplorerTab& t, std::vector<std::string> paths, bool offerOpen = false);
+    void askDeleteSelection(ExplorerTab& t);
+    void pickFilesToAdd(ExplorerTab& t, bool folders);
+    void runEdit(int tabId, kz::ArchiveEdit edit, std::vector<std::string> selectAfter);
+    void dragSelectionOut(int tabId);
+    void askConfirm(const std::string& title, const std::string& text, const std::string& okLabel, int icon,
+                    const ImVec4& color, std::function<void()> onOk, const std::string& altLabel = "",
+                    std::function<void()> onAlt = nullptr);
+    void drawConfirmPopup();
+    int pendingDrag_ = -1;   // tab whose selection starts dragging out after this frame
+    bool dragging_ = false;  // a drag out is running
+    int dropTab_ = -1;       // tab whose file area was drawn last frame...
+    ImVec2 dropMin_, dropMax_;  // ...and where (screen coordinates)
 
     // drawing
     void drawMenuBar();
@@ -219,6 +246,14 @@ private:
         char pw[256] = {}, pw2[256] = {};
     } conv_;
     void drawSplitOption(bool* on, int* preset, int* customMb, float inner);
+
+    struct ConfirmState {
+        bool request = false;
+        std::string title, text, ok, alt;
+        int icon = 0;
+        ImVec4 color;
+        std::function<void()> onOk, onAlt;
+    } confirm_;
 
     struct PasswordState {
         bool request = false;

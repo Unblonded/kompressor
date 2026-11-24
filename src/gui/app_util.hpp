@@ -15,6 +15,8 @@ std::string parentDir(const std::string& p);
 // Shows a file or folder in Finder / Explorer / the Linux file manager.
 void reveal(const std::string& path);
 int formatIndex(kz::OutFormat f);
+// Removes temporary copies (opened / copied / dragged-out entries) left by earlier sessions, in the background.
+void startTempCleanup();
 // Deepest folder containing every input (e.g. C:/a/b for C:/a/b/x.txt and C:/a/b/c/y). Falls back to
 // the first input's folder when they share nothing (different drives).
 std::string commonParent(const std::vector<std::string>& inputs);

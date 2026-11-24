@@ -34,6 +34,8 @@ static void usage() {
         "  kompressor-cli super   <out.kmp> <files/folders...> [-m fast|balanced|ultra|max|extreme|ultimate] [-t threads] [--no-dedup]\n"
         "  kompressor-cli convert <archive> <out.zip|.7z|.tar.zst|.kmp|...> [-l level] [-m mode] [-p password]\n"
         "                         [-e new-password]   (re-pack into another format; -e encrypts a ZIP output)\n"
+        "  kompressor-cli add     <archive> <files/folders...> [-d folder] [-p password]   (add or replace entries)\n"
+        "  kompressor-cli delete  <archive> <entry...> [-p password]   (remove entries and folders)\n"
         "  kompressor-cli formats\n\n"
         "  create, super and convert also take -v <size> to split the result into parts (e.g. -v 100m, -v 4g)\n",
         KZ_VERSION);
@@ -104,7 +106,7 @@ int main(int argc, char** argv) {
     }
     std::string cmd = args[1];
     std::vector<std::string> pos;
-    std::string password, outDir, mode = "ultra", encrypt;
+    std::string password, outDir, mode = "ultra", encrypt, intoDir;
     int level = -1, threads = 0;
     uint64_t volumeSize = 0;
     bool skipExisting = false, dedup = true;
@@ -117,6 +119,7 @@ int main(int argc, char** argv) {
         else if (a == "-t") threads = std::atoi(next().c_str());
         else if (a == "-m") mode = next();
         else if (a == "-e") encrypt = next();
+        else if (a == "-d") intoDir = next();
         else if (a == "-v") {
             std::string v = next();
             volumeSize = parseSize(v);
@@ -300,6 +303,26 @@ int main(int argc, char** argv) {
         uint64_t before = sourceSize(src);  // every volume of a split archive
         std::printf("Converted in %s: %s -> %s\n  %s\n", formatDuration(s).c_str(), humanSize(before).c_str(),
                     humanSize(res.outputBytes).c_str(), res.summary.c_str());
+        return 0;
+    }
+
+    if (cmd == "add" || cmd == "a" || cmd == "delete" || cmd == "d") {
+        if (pos.size() < 2) return usage(), 1;
+        Source src{pos[0], nullptr, ""};
+        ArchiveEdit edit;
+        bool adding = cmd == "add" || cmd == "a";
+        for (size_t i = 1; i < pos.size(); ++i) (adding ? edit.add : edit.remove).push_back(pos[i]);
+        edit.addUnder = intoDir;
+        CompressResult res;
+        auto t0 = std::chrono::steady_clock::now();
+        bool ok = run(prog, [&] { return editArchive(src, edit, password, prog, res, err); });
+        printWarnings(prog);
+        if (!ok) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return prog.needPassword ? 3 : 2;
+        }
+        double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("Updated %s in %s\n  %s\n", pos[0].c_str(), formatDuration(s).c_str(), res.summary.c_str());
         return 0;
     }
 

@@ -142,6 +142,7 @@ App::App(GLFWwindow* window, ImFont* mono, float scale) : window_(window), mono_
     lastDir_ = FileDialog::homeDir();
     fileDlg_.setParent(window);
     shellMenu_ = shell::registered();
+    startTempCleanup();
     log(col::Dim, std::string("Kompressor ") + KZ_VERSION + " ready. Drop files or archives onto the window.");
 }
 
@@ -270,6 +271,16 @@ void App::loadTab(int tabId) {
                 t->info = std::move(*info);
                 buildTree(*t);
                 computeRows(*t);
+                t->editable = kz::canEditArchive(t->src, t->editWhy);
+                if (!t->restoreDir.empty() || !t->restoreSelect.empty()) {  // back where the user was before an edit
+                    for (int i = 1; i < (int)t->nodes.size(); ++i)
+                        if (t->nodes[i].isDir && t->nodes[i].path == t->restoreDir) navigateTo(*t, i, -1, false);
+                    for (auto& p : t->restoreSelect)
+                        for (int i : t->nodes[t->cwd].children)
+                            if (t->nodes[i].path == p) t->selection.insert(i);
+                    t->restoreDir.clear();
+                    t->restoreSelect.clear();
+                }
                 if (!t->info.extra.empty() && !t->info.isKmp) log(col::Warn, title + ": " + t->info.extra);
                 log(col::Dim, "Opened " + title + " (" + t->info.format + ", " + std::to_string(t->info.entries.size()) + " entries)");
             } else if (j.prog->needPassword && j.message != "Cancelled") {
@@ -450,7 +461,7 @@ void App::requestPreview(ExplorerTab& t, int node) {
     t.lineStarts.clear();
     t.previewError.clear();
     t.previewLoading = false;
-    if (node <= 0 || t.nodes[node].isDir || t.nodes[node].isLink) return;
+    if (node <= 0 || t.editing || t.nodes[node].isDir || t.nodes[node].isLink) return;
     t.previewLoading = true;
     auto data = std::make_shared<std::vector<uint8_t>>();
     auto trunc = std::make_shared<bool>(false);
@@ -516,7 +527,20 @@ void App::actionOpen() {
     });
 }
 
-void App::onDrop(const std::vector<std::string>& paths) {
+void App::onDrop(const std::vector<std::string>& paths, ImVec2 at) {
+    // Dropped onto an open archive's file list: add the files to it (at the folder being shown).
+    if (!cmp_.open && dropTab_ >= 0 && at.x >= dropMin_.x && at.y >= dropMin_.y && at.x < dropMax_.x && at.y < dropMax_.y) {
+        ExplorerTab* t = tabById(dropTab_);
+        if (t && t->editable && !t->loading) {  // read-only archives keep the old behaviour below
+            bool allArchives = true;
+            for (auto& p : paths) {
+                std::error_code ec;
+                if (!std::filesystem::is_regular_file(kz::u8path(p), ec) || !kz::looksLikeArchive(p)) allArchives = false;
+            }
+            askAddFiles(*t, paths, allArchives);
+            return;
+        }
+    }
     if (cmp_.open) {
         std::string oldDir = commonParent(cmp_.inputs);
         for (auto& p : paths) cmp_.inputs.push_back(p);
