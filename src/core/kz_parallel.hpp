@@ -43,6 +43,8 @@ public:
     virtual ~ArchiveWriter() = default;
     virtual void addDir(const std::string& path, uint32_t mode, int64_t mtime) = 0;
     virtual bool addSymlink(const std::string& path, const std::string& target, int64_t mtime) = 0;
+    // Optional: the size of the file the next beginFile() starts (lets ZIP skip ZIP64 headers).
+    virtual void expectSize(uint64_t) {}
     virtual bool beginFile(const std::string& path, uint32_t mode, int64_t mtime) = 0;
     virtual bool write(const void* data, size_t n) = 0;
     virtual bool finish(std::string& err) = 0;

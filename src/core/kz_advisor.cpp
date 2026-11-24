@@ -84,7 +84,7 @@ uint64_t fnv(const std::vector<char>& b) {
 
 // ---------------------------------------------------------------- estimates
 // Calibrated on a 553 MB corpus (64% programs, 36% text and code) on a 24-thread machine:
-//   tar.zst-3 221 MB 1.6 s | zip-6 232 MB 20.6 s | zip-1 260 MB 7.8 s | 7z-5 171 MB 29.7 s | 7z-9 168.5 MB 54 s
+//   tar.zst-3 221 MB 1.6 s | zip-6 232 MB 1.3 s | zip-9 231 MB 2.7 s | 7z-5 171 MB 29.7 s | 7z-9 168.5 MB 54 s
 //   tar.xz-6 170 MB 32 s   | tar.gz 232 MB 1.9 s | tar.zst-19 173 MB 39 s
 //   kmp fast 221 MB 1.6 s | balanced 174 MB 28 s | ultra 162 MB 36 s | max 161 MB 63 s | extreme 139 MB 96 s
 //   ultimate 133 MB 900 s
@@ -100,8 +100,8 @@ struct Model {
 Model modelFor(OutFormat f, int level, double textShare) {
     auto lv = [&](int def) { return level < 0 ? def : level; };
     switch (f) {
-        case OutFormat::Zip:  // deflate runs on one core
-            return lv(6) <= 2 ? Model{1.21, 71, false, false, false} : Model{1.06, lv(6) >= 8 ? 18.0 : 27.0, false, false, false};
+        case OutFormat::Zip:  // deflate split into chunks across every core (AES-encrypted ZIPs stay on one)
+            return lv(6) <= 2 ? Model{1.21, 600, true, false, false} : Model{1.06, lv(6) >= 8 ? 205.0 : 425.0, true, false, false};
         case OutFormat::SevenZip: return lv(5) >= 8 ? Model{0.73, 10.2, true, false, false} : lv(5) <= 2 ? Model{0.86, 60, true, false, false}
                                                                                            : Model{0.76, 18.6, true, false, false};
         case OutFormat::TarZst:

@@ -82,6 +82,7 @@ add_library(kompressor_core STATIC
   src/core/kz_advisor.cpp
   src/core/kz_rar.cpp
   src/core/kz_perf.cpp
+  src/core/kz_zip.cpp
 )
 target_include_directories(kompressor_core PUBLIC src/core PRIVATE ${xxhash_SOURCE_DIR})
 target_link_libraries(kompressor_core PUBLIC LibArchive::LibArchive LibLZMA::LibLZMA ZLIB::ZLIB ${KZ_ZSTD_TARGET})

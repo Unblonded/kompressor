@@ -1,4 +1,5 @@
 #include "kmp.hpp"
+#include "kz_perf.hpp"
 
 #include <lzma.h>
 #include <zstd.h>
@@ -615,13 +616,19 @@ bool Writer::open(const fs::path& outPath, const Options& opt, std::string& err)
             case Mode::Ultra: mb = 64; minMb = 16; break;
             case Mode::Max: mb = 128; minMb = 32; break;
             case Mode::Extreme: mb = 64; minMb = 2; break;  // context mixing parallelises by block only
-            case Mode::Ultimate: mb = 256; minMb = 256; break;  // long history beats parallelism here
+            // Long history beats parallelism here, unless the user asked for every core.
+            case Mode::Ultimate: mb = 256; minMb = perf::maxPerformance() ? 32 : 256; break;
         }
         // Not enough data to give every core a full-size block: use smaller blocks (a small ratio
         // cost) so all of them work instead of a few.
+        // Maximum performance mode aims at ~4 blocks per core instead: one wave of blocks ends with a
+        // few big stragglers on a few cores, smaller ones keep every core busy to the end.
         if (opt.sizeHint) {
-            uint64_t perCore = (opt.sizeHint + hardwareThreads() - 1) / hardwareThreads();
-            size_t want = (size_t)((perCore + MiB - 1) / MiB);
+            bool maxPerf = perf::maxPerformance();
+            uint64_t units = (uint64_t)hardwareThreads() * (maxPerf ? 2 : 1);
+            uint64_t perUnit = (opt.sizeHint + units - 1) / units;
+            size_t want = (size_t)((perUnit + MiB - 1) / MiB);
+            if (maxPerf) minMb = std::max<size_t>(2, minMb / 2);
             mb = std::clamp<size_t>(want, minMb, mb);
         }
     }

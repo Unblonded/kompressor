@@ -817,6 +817,9 @@ bool beginDialog(const char* id, const char* title, const char* subtitle, Ico ic
 void dialogFooter() {
     if (!g_dlgBody) return;
     ImGui::PopTextWrapPos();
+    // The body sizes itself to its content's exact bottom edge, and its clip edge would shave the last
+    // control (a toggle's rounded bottom, a frame's border): leave a little room below it.
+    ImGui::Dummy(ImVec2(0, em() * 0.35f));
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();

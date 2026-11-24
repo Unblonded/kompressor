@@ -15,6 +15,7 @@
 #include "kz_archive.hpp"
 #include "kz_parallel.hpp"
 #include "kz_rar.hpp"
+#include "kz_zip.hpp"
 
 namespace kz {
 
@@ -340,9 +341,19 @@ std::unique_ptr<ArchiveWriter> openDirectWriter(const CompressOptions& opt, cons
         if (!w->open(tmp, err)) return nullptr;
         return w;
     }
+    if (opt.format == OutFormat::Zip && opt.password.empty()) {
+        auto w = std::make_unique<ZipWriter>();
+        if (!w->open(tmp, opt.level < 0 ? formatDesc(OutFormat::Zip).defLevel : opt.level, opt.threads, err)) return nullptr;
+        return w;
+    }
     return nullptr;
 }
-bool writesDirectly(OutFormat f) { return f == OutFormat::SevenZip || f == OutFormat::Rar; }
+// Formats written by Kompressor itself: 7z and ZIP on every core (an encrypted ZIP goes through
+// libarchive, which does the AES), RAR5 stored.
+bool writesDirectly(const CompressOptions& opt) {
+    return opt.format == OutFormat::SevenZip || opt.format == OutFormat::Rar ||
+           (opt.format == OutFormat::Zip && opt.password.empty());
+}
 
 // 7z / RAR, reading files from disk.
 bool createDirect(const std::vector<InputItem>& items, const std::string& outPath, const CompressOptions& opt,
@@ -378,6 +389,7 @@ bool createDirect(const std::vector<InputItem>& items, const std::string& outPat
             prog.done += it.size;
             continue;
         }
+        w.expectSize(it.size);
         w.beginFile(it.arcPath, it.mode, it.mtime);
         while (in) {
             in.read(buf.data(), (std::streamsize)buf.size());
@@ -392,7 +404,7 @@ bool createDirect(const std::vector<InputItem>& items, const std::string& outPat
             if (prog.cancelled()) break;
         }
     }
-    prog.setStatus(opt.format == OutFormat::Rar ? "Finishing RAR..." : "Finishing 7z...");
+    prog.setStatus(std::string("Finishing ") + formatDesc(opt.format).name + "...");
     if (!w.finish(err)) return false;
     if (!commitTemp(tmp, outPath, err)) return false;
     fillResult(res, items, outPath);
@@ -416,7 +428,7 @@ bool createLibarchive(const std::vector<InputItem>& items, const std::string& ou
         err = std::string(fd.name) + " does not support passwords - use ZIP for encryption";
         return false;
     }
-    if (writesDirectly(opt.format)) return createDirect(items, outPath, opt, prog, res, err);
+    if (writesDirectly(opt)) return createDirect(items, outPath, opt, prog, res, err);
 
     uint64_t total = 0;
     for (auto& i : items) total += i.size;
@@ -809,6 +821,7 @@ public:
         if (e.type == 1) w_.addDir(e.path, e.mode, e.mtime);
         else if (e.type == 2) ok = w_.addSymlink(e.path, e.link, e.mtime);
         else {
+            if (e.size) w_.expectSize(e.size);  // 0 may just mean "unknown"
             ok = w_.beginFile(e.path, e.mode, e.mtime);
             ++files_;
         }
@@ -926,7 +939,7 @@ static bool convertWhole(const Source& src, const std::string& outPath, const Co
 
     std::string tmp = tmpPathFor(outPath);
     uint64_t hint = sourceSize(src) * 2 + addBytes;  // rough unpacked size, to size the parallel work units
-    const bool is7z = writesDirectly(opt.format);
+    const bool is7z = writesDirectly(opt);
     std::unique_ptr<ArchiveWriter> direct;
     LaOutput lo;
     std::unique_ptr<EntrySink> sinkOwner;

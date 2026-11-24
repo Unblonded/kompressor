@@ -160,6 +160,14 @@ int main(int argc, char** argv) {
             args.erase(args.begin() + i, args.begin() + i + 2);
             break;
         }
+    // "--snapshot-size 1320x1400": a different window size, to check layouts that need more room.
+    int winW = 1320, winH = 840;
+    for (size_t i = 1; i + 1 < args.size(); ++i)
+        if (args[i] == "--snapshot-size") {
+            std::sscanf(args[i + 1].c_str(), "%dx%d", &winW, &winH);
+            args.erase(args.begin() + i, args.begin() + i + 2);
+            break;
+        }
 
     // Explorer menu maintenance: "--register-shell" / "--unregister-shell".
     for (size_t i = 1; i < args.size(); ++i)
@@ -222,7 +230,7 @@ int main(int argc, char** argv) {
 #endif
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
 
-    GLFWwindow* window = glfwCreateWindow(1320, 840, "Kompressor", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(winW, winH, "Kompressor", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
         return 1;
