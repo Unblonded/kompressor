@@ -79,6 +79,7 @@ add_library(kompressor_core STATIC
   src/core/kmp.cpp
   src/core/kz_parallel.cpp
   src/core/kz_cm.cpp
+  src/core/kz_advisor.cpp
   src/core/kz_rar.cpp
 )
 target_include_directories(kompressor_core PUBLIC src/core PRIVATE ${xxhash_SOURCE_DIR})

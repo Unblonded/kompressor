@@ -5,6 +5,7 @@ A cross-platform (Windows · macOS · Linux) file compressor written in C++17 wi
 * **Extracts every common archive format itself**, with no 7-Zip, unrar or tar needed: ZIP/ZIPX/JAR/APK, 7Z, RAR & RAR5 (including solid and `.partN.rar` volumes), TAR, GZ, BZ2, XZ, LZMA, ZST, LZ4, LZ, Z, ISO 9660, CAB, LHA, XAR/PKG, CPIO, RPM, DEB/AR, WARC and split `.7z.001` sets.
 * **Compresses into standard formats**: ZIP (optionally AES-256), 7Z, TAR, TAR.GZ/BZ2/XZ/ZST/LZ4, single-file GZ/BZ2/XZ/ZST/LZ4, ISO and CPIO.
 * **Super Compresses** into its own `.kmp` format (see below).
+* **Recommends a format** for what you need (best overall, smallest, fastest, share with anyone, password-protected). Before compressing, it takes a quick look at the files: what kinds they are, how much is already compressed (a zstd probe over samples), and what's repeated. It shows an estimated size and time, and one click applies the recommendation. Recompressing uses the archive's own listing instead.
 * **Lets you browse an archive without extracting it**: a folder tree, search, a text/hex preview, extraction of selected items, and nested archives (a `.tar.gz` inside a `.zip` inside a `.deb`…) that open in memory.
 * **Works with files inside archives like a folder**: double-click a file to open it in its usual app, drag files out to the desktop or Explorer (or Ctrl+C them), and drop files onto an open archive (or Ctrl+V, or Add) to add them to the folder you're in. Delete removes entries. Edited archives are rewritten in their own format (KMP keeps its mode, encrypted ZIPs keep their password).
 * Integrity **Test**, password prompts, background jobs you can cancel, drag & drop.
@@ -106,6 +107,7 @@ kompressor-cli convert <any-archive> out.7z|.zip|.tar.zst|.kmp|... [-l level] [-
                                                      # re-pack into another format without temp files
 kompressor-cli add     <archive> <files/folders> [-d folder-in-archive] [-p pw]   # add or replace entries
 kompressor-cli delete  <archive> <entry...> [-p pw]                               # remove entries / folders
+kompressor-cli advise  <files/folders>               # which format suits these files, for each goal
 kompressor-cli formats
 
 # create, super and convert take -v <size> to split the output into .001, .002 ... parts

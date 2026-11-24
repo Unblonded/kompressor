@@ -10,6 +10,7 @@
 
 #include "kmp.hpp"
 #include "kz_cm.hpp"
+#include "kz_advisor.hpp"
 #include "kz_archive.hpp"
 
 #ifdef _WIN32
@@ -36,6 +37,7 @@ static void usage() {
         "                         [-e new-password]   (re-pack into another format; -e encrypts a ZIP output)\n"
         "  kompressor-cli add     <archive> <files/folders...> [-d folder] [-p password]   (add or replace entries)\n"
         "  kompressor-cli delete  <archive> <entry...> [-p password]   (remove entries and folders)\n"
+        "  kompressor-cli advise  <files/folders...>   (which format suits these files, for each goal)\n"
         "  kompressor-cli formats\n\n"
         "  create, super and convert also take -v <size> to split the result into parts (e.g. -v 100m, -v 4g)\n",
         KZ_VERSION);
@@ -303,6 +305,29 @@ int main(int argc, char** argv) {
         uint64_t before = sourceSize(src);  // every volume of a split archive
         std::printf("Converted in %s: %s -> %s\n  %s\n", formatDuration(s).c_str(), humanSize(before).c_str(),
                     humanSize(res.outputBytes).c_str(), res.summary.c_str());
+        return 0;
+    }
+
+    if (cmd == "advise") {  // which format suits these files, for every goal
+        if (pos.empty()) return usage(), 1;
+        ContentProfile p;
+        bool ok = run(prog, [&] { return profileInputs(pos, p, prog, err); });
+        if (!ok) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 2;
+        }
+        std::printf("%s in %llu files: %.0f%% text, %.0f%% already compressed, %.0f%% programs, %.0f%% other\n",
+                    humanSize(p.totalBytes).c_str(), (unsigned long long)p.files, 100.0 * p.textBytes / std::max<uint64_t>(1, p.totalBytes),
+                    100.0 * p.mediaBytes / std::max<uint64_t>(1, p.totalBytes), 100.0 * p.exeBytes / std::max<uint64_t>(1, p.totalBytes),
+                    100.0 * p.otherBytes / std::max<uint64_t>(1, p.totalBytes));
+        std::printf("probe: %.0f%% won't shrink, the rest packs to %.0f%% with zstd -3, %s repeated\n\n", p.incompressible * 100,
+                    p.ratio * 100, humanSize(p.dupBytes).c_str());
+        for (Goal g : {Goal::Balanced, Goal::Smallest, Goal::Fastest, Goal::Share, Goal::Protect}) {
+            Recommendation r = recommend(p, g, threads);
+            std::printf("%-13s %-40s ~%s, ~%s\n  %s\n", goalName(g), r.title.c_str(), humanSize(r.estBytes).c_str(),
+                        formatDuration(r.estSeconds).c_str(), r.why.c_str());
+            for (auto& n : r.notes) std::printf("  - %s\n", n.c_str());
+        }
         return 0;
     }
 

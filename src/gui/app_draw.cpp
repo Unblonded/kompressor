@@ -1543,6 +1543,98 @@ void App::drawActivity() {
 }
 
 // ============================================================================ dialogs
+bool App::drawAdvice(const kz::ContentProfile* p, bool measuring, int* goal, int curFormat, int curLevel, int curMode,
+                     unsigned threads, float inner, kz::Recommendation& out) {
+    const float em = emPx();
+    bool apply = false;
+    caption("RECOMMENDED FOR YOU");
+    static const char* goals[] = {"Best overall", "Smallest", "Fastest", "Share", "Password"};
+    segmented("##goal", goal, goals, 5);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+        ImGui::SetTooltip("What matters most for this archive?\nBest overall: good size, quick, opens in common tools\n"
+                          "Smallest: the smallest file, however long it takes\nFastest: done in seconds\n"
+                          "Share: opens anywhere without installing anything\nPassword: encrypted with AES-256");
+    ImGui::Dummy(ImVec2(0, em * 0.15f));
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 a = ImGui::GetCursorScreenPos();
+    const float pad = em * 0.9f, x0 = a.x + pad, w = inner - pad * 2;
+    dl->ChannelsSplit(2);
+    dl->ChannelsSetCurrent(1);
+    ImGui::SetCursorScreenPos(ImVec2(x0, a.y + em * 0.75f));
+    ImGui::BeginGroup();
+    if (measuring || !p) {
+        spinner(em * 0.55f, col::Accent);
+        ImGui::SameLine(0, em * 0.6f);
+        ImGui::TextColored(col::Dim, "Looking at your files...");
+    } else {
+        kz::Recommendation r = kz::recommend(*p, (kz::Goal)*goal, threads);
+        bool inUse = formatIndex(r.format) == curFormat && (r.format == kz::OutFormat::Kmp ? curMode == r.level : curLevel == r.level);
+        // title row: icon + format on the left, "Use this" on the right
+        float rowY = ImGui::GetCursorScreenPos().y, bh = ImGui::GetFrameHeight();
+        ImGui::SetCursorScreenPos(ImVec2(x0, rowY + (bh - em * 1.1f) * 0.5f));
+        icon(Ico::Sparkle, em * 1.1f, col::Accent);
+        ImGui::SameLine(0, em * 0.5f);
+        ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, rowY + (bh - ImGui::GetTextLineHeight()) * 0.5f));
+        ImGui::PushFont(fonts().bold);
+        ImGui::TextUnformatted(r.title.c_str());
+        ImGui::PopFont();
+        float bw = em * 7.2f;
+        ImGui::SetCursorScreenPos(ImVec2(x0 + w - bw, rowY));
+        if (inUse) {
+            ImGui::SetCursorScreenPos(ImVec2(x0 + w - em * 4.6f, rowY + (bh - ImGui::GetTextLineHeight()) * 0.5f));
+            chip("In use", col::Ok);
+        } else if (primaryButton("Use this", Ico::Check, ImVec2(bw, bh))) {
+            out = r;
+            apply = true;
+        }
+        ImGui::SetCursorScreenPos(ImVec2(x0, rowY + bh + em * 0.35f));
+        ImGui::PushTextWrapPos(x0 - ImGui::GetWindowPos().x + w);
+        ImGui::PushStyleColor(ImGuiCol_Text, col::Dim);
+        ImGui::TextWrapped("%s", r.why.c_str());
+        ImGui::PopStyleColor();
+        // estimate
+        ImGui::Dummy(ImVec2(0, em * 0.1f));
+        ImGui::PushFont(fonts().caption);
+        char est[256];
+        double share = p->totalBytes ? double(r.estBytes) / double(p->totalBytes) : 1.0;
+        std::snprintf(est, sizeof est, "About %s (%.0f%% of %s), roughly %s on this PC%s", kz::humanSize(r.estBytes).c_str(),
+                      share * 100.0, kz::humanSize(p->totalBytes).c_str(), kz::formatDuration(r.estSeconds).c_str(),
+                      p->measured ? "" : " - guessed from the file names");
+        ImGui::TextColored(mix(col::Accent, col::Text, 0.45f), "%s", est);
+        // what's in it
+        std::string mix_;
+        auto part = [&](uint64_t b, const char* what) {
+            if (!p->totalBytes || b * 20 < p->totalBytes) return;
+            if (!mix_.empty()) mix_ += ", ";
+            mix_ += std::to_string((int)std::lround(100.0 * double(b) / double(p->totalBytes))) + "% " + what;
+        };
+        part(p->textBytes, "text & code");
+        part(p->mediaBytes, "already compressed");
+        part(p->exeBytes, "programs");
+        part(p->otherBytes, "other data");
+        if (!mix_.empty()) ImGui::TextColored(col::Faint, "%llu files: %s", (unsigned long long)p->files, mix_.c_str());
+        for (auto& n : r.notes) {
+            ImGui::TextColored(col::Faint, "-");
+            ImGui::SameLine(0, em * 0.4f);
+            ImGui::PushStyleColor(ImGuiCol_Text, col::Dim);
+            ImGui::TextWrapped("%s", n.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopFont();
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::EndGroup();
+    float bottom = ImGui::GetItemRectMax().y + em * 0.75f;
+    dl->ChannelsSetCurrent(0);
+    dl->AddRectFilled(a, ImVec2(a.x + inner, bottom), u32(col::Accent, 0.07f), em * 0.7f);
+    dl->AddRect(a, ImVec2(a.x + inner, bottom), u32(col::Accent, 0.28f), em * 0.7f);
+    dl->ChannelsMerge();
+    ImGui::SetCursorScreenPos(ImVec2(a.x, bottom));
+    ImGui::Dummy(ImVec2(inner, em * 0.3f));
+    return apply;
+}
+
 void App::drawCompressWindow() {
     if (!cmp_.open) return;
     const float em = emPx();
@@ -1654,6 +1746,35 @@ void App::drawCompressWindow() {
     }
     ImGui::Dummy(ImVec2(0, em * 0.3f));
 
+    // --- recommendation, from a quick look at the files (re-measured whenever the list changes)
+    if (!cmp_.inputs.empty()) {
+        std::string key;
+        for (auto& s : cmp_.inputs) key += s + '\n';
+        if (key != cmp_.adviceKey) {
+            if (cmp_.adviceProg) cmp_.adviceProg->cancel = true;
+            cmp_.adviceKey = key;
+            cmp_.profile.reset();
+            auto prof = std::make_shared<kz::ContentProfile>();
+            auto inputs = cmp_.inputs;
+            Job& j = startJob("Looking at the files",
+                [inputs, prof](kz::Progress& p, std::string& err) { return kz::profileInputs(inputs, *prof, p, err); },
+                [this, key, prof](Job& j) {
+                    if (cmp_.adviceKey == key && j.message != "Cancelled") cmp_.profile = prof;  // a failed look still advises by defaults
+                },
+                false);
+            cmp_.adviceProg = j.prog;
+        }
+        kz::Recommendation rec;
+        if (drawAdvice(cmp_.profile.get(), !cmp_.profile, &cmp_.goal, cmp_.format, cmp_.level, cmp_.kmpMode, (unsigned)cmp_.threads,
+                       inner, rec)) {
+            cmp_.format = formatIndex(rec.format);
+            if (rec.format == kz::OutFormat::Kmp) cmp_.kmpMode = rec.level;
+            else cmp_.level = rec.level;
+            if (cmp_.out[0]) copyTo(cmp_.out, sizeof cmp_.out, kz::withFormatExtension(cmp_.out, rec.format));
+            cmp_.focusPassword = rec.wantsPassword;
+        }
+    }
+
     // --- format pills
     caption("FORMAT");
     {
@@ -1729,6 +1850,11 @@ void App::drawCompressWindow() {
         caption("ENCRYPTION  -  AES-256 (OPTIONAL)");
         float hw = (inner - em * 0.6f) * 0.5f;
         ImGui::SetNextItemWidth(hw);
+        if (cmp_.focusPassword) {
+            ImGui::SetKeyboardFocusHere();
+            ImGui::SetScrollHereY(0.5f);
+            cmp_.focusPassword = false;
+        }
         ImGui::InputTextWithHint("##pw", "Password", cmp_.pw, sizeof cmp_.pw, ImGuiInputTextFlags_Password);
         ImGui::SameLine(0, em * 0.6f);
         ImGui::SetNextItemWidth(hw);
@@ -1927,6 +2053,24 @@ void App::drawConvertWindow() {
         ImGui::Dummy(ImVec2(0, em * 0.2f));
     }
 
+    // --- recommendation (from the listing: names, sizes and how well the archive packs today)
+    {
+        kz::Recommendation rec;
+        if (drawAdvice(&conv_.profile, false, &conv_.goal, conv_.format, conv_.level, conv_.mode, 0, inner, rec)) {
+            conv_.format = formatIndex(rec.format);
+            if (rec.format == kz::OutFormat::Kmp) conv_.mode = rec.level;
+            else conv_.level = rec.level;
+            if (conv_.out[0]) {
+                std::string o = kz::withFormatExtension(conv_.out, rec.format);
+                if (!t->src.inMemory() && kz::u8path(o) == kz::u8path(t->src.path))
+                    o = kz::pathToUtf8(kz::u8path(parentDir(o)) /
+                                       kz::u8path(kz::stripArchiveExt(kz::fileNameOf(o)) + "-recompressed" + kz::formatDesc(rec.format).ext));
+                copyTo(conv_.out, sizeof conv_.out, o);
+            }
+            conv_.focusPassword = rec.wantsPassword;
+        }
+    }
+
     // --- format
     caption("FORMAT");
     {
@@ -2006,6 +2150,11 @@ void App::drawConvertWindow() {
         caption("ENCRYPTION  -  AES-256 (OPTIONAL)");
         float hw = (inner - em * 0.6f) * 0.5f;
         ImGui::SetNextItemWidth(hw);
+        if (conv_.focusPassword) {
+            ImGui::SetKeyboardFocusHere();
+            ImGui::SetScrollHereY(0.5f);
+            conv_.focusPassword = false;
+        }
         ImGui::InputTextWithHint("##cpw", "Password", conv_.pw, sizeof conv_.pw, ImGuiInputTextFlags_Password);
         ImGui::SameLine(0, em * 0.6f);
         ImGui::SetNextItemWidth(hw);

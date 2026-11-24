@@ -567,6 +567,7 @@ void App::openCompressDialog(std::vector<std::string> inputs, bool super) {
     cmp_.focus = true;
     cmp_.inputs = std::move(inputs);
     cmp_.format = formatIndex(super ? kz::OutFormat::Kmp : kz::OutFormat::Zip);
+    if (super) cmp_.goal = (int)kz::Goal::Smallest;
     const auto& fd = kz::outputFormats()[cmp_.format];
     cmp_.level = fd.defLevel;
     cmp_.pw[0] = cmp_.pw2[0] = 0;
@@ -734,6 +735,8 @@ void App::actionConvert(ExplorerTab& t, bool super) {
     if (!t.src.inMemory() && kz::u8path(out) == kz::u8path(t.src.path))
         out = kz::pathToUtf8(kz::u8path(base) / kz::u8path(stem + "-recompressed" + kz::formatDesc(want).ext));
     copyTo(c.out, sizeof c.out, out);
+    c.goal = super ? (int)kz::Goal::Smallest : conv_.goal;
+    c.profile = kz::profileListing(t.info);  // what's inside, from the listing: no data read
     conv_ = c;
 }
 

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "file_dialog.hpp"
+#include "kz_advisor.hpp"
 #include "kz_archive.hpp"
 
 struct GLFWwindow;
@@ -218,6 +219,12 @@ private:
         bool openWhenDone = true;
         bool split = false;
         int splitPreset = 0, splitCustomMb = 1024;
+        // recommendation
+        int goal = 0;                                   // kz::Goal
+        std::string adviceKey;                          // the inputs the profile below belongs to
+        std::shared_ptr<kz::ContentProfile> profile;    // null while measuring
+        std::shared_ptr<kz::Progress> adviceProg;
+        bool focusPassword = false;
     } cmp_;
 
     struct ExtractState {
@@ -244,8 +251,15 @@ private:
         bool split = false;
         int splitPreset = 0, splitCustomMb = 1024;
         char pw[256] = {}, pw2[256] = {};
+        int goal = 0;
+        kz::ContentProfile profile;
+        bool focusPassword = false;
     } conv_;
     void drawSplitOption(bool* on, int* preset, int* customMb, float inner);
+    // "Recommended for you": goal picker, the suggested format with its reasons and estimates, and a button
+    // that applies it. Returns true when the user clicked "Use this" (`out` holds the recommendation).
+    bool drawAdvice(const kz::ContentProfile* profile, bool measuring, int* goal, int curFormat, int curLevel, int curMode,
+                    unsigned threads, float inner, kz::Recommendation& out);
 
     struct ConfirmState {
         bool request = false;
