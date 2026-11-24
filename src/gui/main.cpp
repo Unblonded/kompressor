@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <vector>
@@ -184,6 +185,20 @@ int main(int argc, char** argv) {
         shellPaths.assign(args.begin() + 3, args.end());
         args.resize(1);
         if (!kzgui::shell::collectShellLaunch(shellAction, shellPaths)) return 0;
+    } else if (args.size() == 4 && args[1] == "--shell-list") {
+        // The menu extension passes very long selections as a UTF-8 list file (one path per line).
+        shellAction = args[2];
+        std::error_code ec;
+        auto listPath = kz::u8path(args[3]);
+        {
+            std::ifstream in(listPath, std::ios::binary);
+            for (std::string line; std::getline(in, line);) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (!line.empty()) shellPaths.push_back(line);
+            }
+        }
+        std::filesystem::remove(listPath, ec);
+        args.resize(1);
     }
 
     glfwSetErrorCallback(onError);

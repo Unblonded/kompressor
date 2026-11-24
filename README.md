@@ -68,7 +68,7 @@ From a "Developer PowerShell for VS" with `VCPKG_ROOT` set:
 ```bash
 cmake --preset windows && cmake --build --preset windows
 ```
-The output is `build/windows/Kompressor.exe`, which has no DLL dependencies. The `windows-arm64` preset builds for ARM64.
+The output is `build/windows/Kompressor.exe`, which has no DLL dependencies, plus `KompShell.dll`, the small Explorer extension that puts the **Komp** entry at the bottom of the right-click menu's first group (without it, the entry falls back to the bottom of the menu). The `windows-arm64` preset builds for ARM64.
 
 To build the installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`) and run:
 ```powershell
@@ -121,6 +121,7 @@ kompressor-cli create backup.7z ~/Photos -v 4g
 src/core/   kz_archive (read/explore/extract/test), kz_writer (create/convert), kmp (super format), kz_formats, kz_common
 src/cli/    kompressor-cli
 src/gui/    main (GLFW/GL/fonts/HiDPI), app (explorer, preview, dialogs, jobs), file_dialog (built-in browser), theme
+src/shellext/ KompShell.dll, the Windows Explorer context-menu extension
 ```
 
 ## Notes & limits

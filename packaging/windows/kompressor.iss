@@ -52,6 +52,8 @@ Name: "addtopath"; Description: "Add the command-line tool (kompressor-cli) to P
 [Files]
 Source: "{#BuildDir}\Kompressor.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\kompressor-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Explorer menu extension. Explorer loads its own copy from %LOCALAPPDATA%\Kompressor\shell, so this one is never locked.
+Source: "{#BuildDir}\KompShell.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Kompressor"; Filename: "{app}\Kompressor.exe"
@@ -68,6 +70,9 @@ Filename: "{app}\Kompressor.exe"; Parameters: "--unregister-shell"; Flags: runhi
 
 [UninstallDelete]
 Type: dirifempty; Name: "{app}"
+; Explorer's copies of the menu extension (one still loaded by Explorer stays until the next sign-in).
+Type: files; Name: "{localappdata}\Kompressor\shell\KompShell-*.dll"
+Type: dirifempty; Name: "{localappdata}\Kompressor\shell"
 
 [Registry]
 ; App preferences (e.g. "right-click menu turned off") go with the app.

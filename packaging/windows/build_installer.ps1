@@ -13,7 +13,7 @@ if (-not $iscc) { throw "Inno Setup 6 not found. Install it with: winget install
 
 $version = (Select-String -Path "$root\CMakeLists.txt" -Pattern 'project\(Kompressor VERSION ([0-9.]+)').Matches[0].Groups[1].Value
 $build = Resolve-Path (Join-Path $root $BuildDir)
-foreach ($exe in "Kompressor.exe", "kompressor-cli.exe") {
+foreach ($exe in "Kompressor.exe", "KompShell.dll", "kompressor-cli.exe") {
   if (-not (Test-Path "$build\$exe")) { throw "$build\$exe is missing - build the 'windows' preset first." }
 }
 & $iscc /Q "/DAppVersion=$version" "/DBuildDir=$build" "/DOutputDir=$build\installer" "$PSScriptRoot\kompressor.iss"
