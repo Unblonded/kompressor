@@ -92,7 +92,7 @@ cmake --preset release && cmake --build --preset release
 ```
 Fedora: `libarchive-devel xz-devel libzstd-devel mesa-libGL-devel libX*-devel`. Arch: `libarchive xz zstd`. To build GLFW with native Wayland support, add `-DKOMPRESSOR_GLFW_WAYLAND=ON`; otherwise it runs under XWayland.
 
-`.github/workflows/build.yml` builds all three platforms and runs a smoke test on each.
+`.github/workflows/build.yml` builds all three platforms and runs a smoke test on each. Every push to `main` then publishes a GitHub release, `v<version>-<build number>`, with the Windows installer and zip, the macOS app and the Linux binaries. The version comes from `project()` in `CMakeLists.txt`.
 
 ## CLI
 
