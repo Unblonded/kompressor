@@ -14,6 +14,8 @@
 #include "native_files.hpp"
 #include "theme.hpp"
 #include "shell_integration.hpp"
+#include "kz_perf.hpp"
+#include "prefs.hpp"
 #include "window_frame.hpp"
 
 namespace kzgui {
@@ -183,6 +185,7 @@ const char* kMod = "Ctrl";
 // ============================================================================ frame
 void App::frame() {
     pumpJobs();
+    updateBoost();
     dropTab_ = -1;  // set again by the archive view drawn this frame
     if (quitWhenDone_ && directJobs_ == 0 && !directFailed_) glfwSetWindowShouldClose(window_, 1);
     const float em = emPx();
@@ -556,17 +559,19 @@ void App::drawStatusBar() {
     dl->AddRectFilled(a, b, u32(col::Surface1));
     dl->AddLine(a, ImVec2(b.x, a.y), u32(col::Line));
 
-    int running = 0;
+    int running = 0, pausedJobs = 0;
     for (auto& j : jobs_)
-        if (j->visible && !j->finished) ++running;
+        if (j->visible && !j->finished) (j->paused() ? pausedJobs : running)++;
     float cy = (a.y + b.y) * 0.5f;
     float x = a.x + em * 1.1f;
     ImVec4 dot = running ? col::Teal : col::Ok;
     float pulse = running ? 0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 5.0f) : 0.0f;
     if (running) dl->AddCircleFilled(ImVec2(x + em * 0.3f, cy), em * (0.3f + 0.25f * pulse), u32(dot, 0.25f * (1.0f - pulse)));
     dl->AddCircleFilled(ImVec2(x + em * 0.3f, cy), em * 0.24f, u32(dot));
-    char left[64];
-    if (running) std::snprintf(left, sizeof left, "%d task%s running", running, running > 1 ? "s" : "");
+    char left[96];
+    if (running) std::snprintf(left, sizeof left, "%d task%s running%s%s", running, running > 1 ? "s" : "",
+                               pausedJobs ? ", some paused" : "", kz::perf::boosted() ? "  -  maximum performance" : "");
+    else if (pausedJobs) std::snprintf(left, sizeof left, "%d task%s paused", pausedJobs, pausedJobs > 1 ? "s" : "");
     else std::snprintf(left, sizeof left, "Ready");
     ImFont* sf = fonts().caption;
     float fs = sf->FontSize * ImGui::GetIO().FontGlobalScale;
@@ -1161,9 +1166,16 @@ void App::drawTable(ExplorerTab& t, float width) {
         navigateTo(t, openDir);
     } else if (openFile >= 0) {
         // Archives inside the archive open as a new tab; anything else opens in its usual app.
-        if (kz::looksLikeArchive(t.nodes[openFile].name)) openNested(t, openFile);
+        if (nestedArchive(t, openFile)) openNested(t, openFile);
         else openEntry(t, openFile);
     }
+}
+
+// An entry to treat as an archive: by its name, or by its content once its preview bytes are loaded.
+bool App::nestedArchive(const ExplorerTab& t, int node) const {
+    if (node < 0 || node >= (int)t.nodes.size() || t.nodes[node].isDir) return false;
+    if (kz::looksLikeArchive(t.nodes[node].name)) return true;
+    return t.previewNode == node && !t.previewLoading && (bool)kz::sniff(t.preview.data(), t.preview.size());
 }
 
 void App::drawPreview(ExplorerTab& t) {
@@ -1292,7 +1304,10 @@ void App::drawPreview(ExplorerTab& t) {
     }
 
     Node& n = t.nodes[nid];
-    Ico ic = iconFor(n);
+    // What the content really is, when the name says something else (e.g. a ZIP named .png).
+    kz::Sniffed real = t.previewNode == nid && !t.previewLoading ? kz::sniff(t.preview.data(), t.preview.size()) : kz::Sniffed();
+    bool misnamed = real && !kz::nameFits(n.name.c_str(), real);
+    Ico ic = misnamed ? Ico::Archive : iconFor(n);
     iconTile(ic, em * 2.6f, iconColor(ic));
     ImGui::SameLine(0, em * 0.8f);
     ImGui::BeginGroup();
@@ -1302,7 +1317,9 @@ void App::drawPreview(ExplorerTab& t) {
     ImGui::PopTextWrapPos();
     ImGui::PopFont();
     ImGui::PushFont(fonts().caption);
-    ImGui::TextColored(col::Dim, "%s  -  %s  -  %s", typeLabel(n).c_str(), kz::humanSize(n.size).c_str(), kz::formatTime(n.mtime).c_str());
+    std::string kind = misnamed ? std::string(real.name) + " archive (named as " + typeLabel(n) + ")" : typeLabel(n);
+    ImGui::TextColored(misnamed ? col::Warn : col::Dim, "%s  -  %s  -  %s", kind.c_str(), kz::humanSize(n.size).c_str(),
+                       kz::formatTime(n.mtime).c_str());
     ImGui::PopFont();
     ImGui::EndGroup();
     ImGui::Dummy(ImVec2(0, em * 0.3f));
@@ -1313,10 +1330,14 @@ void App::drawPreview(ExplorerTab& t) {
         t.selection = {nid};
         actionExtract(t, true);
     }
-    if (kz::looksLikeArchive(n.name)) {
+    if (nestedArchive(t, nid)) {
         ImGui::SameLine(0, em * 0.2f);
         if (ghostButton("Explore", Ico::Archive, ImVec2(0, ImGui::GetFrameHeight()))) openNested(t, nid);
-        ImGui::SetItemTooltip("Open this archive in a new tab");
+        kz::Sniffed real = t.previewNode == nid ? kz::sniff(t.preview.data(), t.preview.size()) : kz::Sniffed();
+        if (real && !kz::nameFits(n.name.c_str(), real))
+            ImGui::SetItemTooltip("Its content is a %s archive, whatever the name says. Open it in a new tab.", real.name);
+        else
+            ImGui::SetItemTooltip("Open this archive in a new tab");
     }
     {
         static const char* modes[] = {"Auto", "Text", "Hex"};
@@ -1453,9 +1474,10 @@ void App::drawActivity() {
                       ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
     // header
-    int running = 0;
+    int running = 0, pausedJobs = 0;
     for (auto& jp : jobs_)
-        if (jp->visible && !jp->finished) ++running;
+        if (jp->visible && !jp->finished) (jp->paused() ? pausedJobs : running)++;
+    float chipY = ImGui::GetCursorPosY();  // the header line: chips sit on it, not on the line below
     ImGui::PushFont(fonts().bold);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Activity");
@@ -1464,12 +1486,28 @@ void App::drawActivity() {
         ImGui::SameLine(0, em * 0.5f);
         char b[32];
         std::snprintf(b, sizeof b, "%d running", running);
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetStyle().FramePadding.y);
+        ImGui::SetCursorPosY(chipY + ImGui::GetStyle().FramePadding.y);
         chip(b, col::Teal);
     }
+    if (pausedJobs) {
+        ImGui::SameLine(0, em * 0.5f);
+        char b[32];
+        std::snprintf(b, sizeof b, "%d paused", pausedJobs);
+        ImGui::SetCursorPosY(chipY + ImGui::GetStyle().FramePadding.y);
+        chip(b, col::Warn);
+    }
     float ib = ImGui::GetFrameHeight() * 0.95f;
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - ib * 2 - em * 0.2f);
+    bool anyJobs = running + pausedJobs > 0;
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - ib * (anyJobs ? 3 : 2) - em * (anyJobs ? 0.4f : 0.2f));
     ImGui::SetCursorPosY(em * 0.7f);
+    if (anyJobs) {
+        // Pause everything while any job runs; resume everything once all are paused.
+        bool pauseAll = running > 0;
+        if (iconButton("##pauseall", pauseAll ? Ico::Pause : Ico::Play, ib, pauseAll ? "Pause all" : "Resume all"))
+            for (auto& jp : jobs_)
+                if (jp->visible && !jp->finished) jp->setPaused(pauseAll, ImGui::GetTime());
+        ImGui::SameLine(0, em * 0.2f);
+    }
     if (iconButton("##clearlog", Ico::Trash, ib, "Clear log", !log_.empty())) log_.clear();
     ImGui::SameLine(0, em * 0.2f);
     if (iconButton("##hideact", Ico::Close, ib, "Hide panel")) showActivity_ = false;
@@ -1481,10 +1519,12 @@ void App::drawActivity() {
         ImGui::PushID(j.id);
         float f = j.prog->fraction();
         bool det = j.prog->total.load() != 0;
-        std::string st = j.prog->status();
-        double el = ImGui::GetTime() - j.started;
+        bool paused = j.paused();
+        std::string st = paused ? "Paused - resume to continue" : j.prog->status();
+        double el = j.elapsed(ImGui::GetTime());
         float avail = ImGui::GetContentRegionAvail().x;
-        spinner(em * 0.55f, col::Teal);
+        if (paused) icon(Ico::Pause, em * 1.1f, col::Warn);
+        else spinner(em * 0.55f, col::Teal);
         ImGui::SameLine(0, em * 0.6f);
         ImGui::BeginGroup();
         ImGui::PushFont(fonts().bold);
@@ -1495,15 +1535,21 @@ void App::drawActivity() {
         if (det) std::snprintf(ov, sizeof ov, "%.0f%%  -  %s", f * 100.0f, kz::formatDuration(el).c_str());
         else std::snprintf(ov, sizeof ov, "%s", kz::formatDuration(el).c_str());
         ImGui::TextColored(col::Dim, "%s", ov);
-        progressBar(det ? f : -1.0f, ImVec2(avail - em * 4.5f, em * 0.36f), col::Accent);
+        progressBar(det ? f : (paused ? 0.0f : -1.0f), ImVec2(avail - em * 6.5f, em * 0.36f), paused ? col::Warn : col::Accent);
         if (!st.empty()) {
             ImGui::PushFont(fonts().caption);
-            ImGui::TextColored(col::Faint, "%s", st.c_str());
+            ImGui::TextColored(paused ? col::Warn : col::Faint, "%s", st.c_str());
             ImGui::PopFont();
         }
         ImGui::EndGroup();
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - em * 1.9f);
-        if (iconButton("##cancel", Ico::Close, em * 1.8f, "Cancel")) j.prog->cancel = true;
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - em * 3.9f);
+        if (iconButton("##pause", paused ? Ico::Play : Ico::Pause, em * 1.8f, paused ? "Resume" : "Pause"))
+            j.setPaused(!paused, ImGui::GetTime());
+        ImGui::SameLine(0, em * 0.2f);
+        if (iconButton("##cancel", Ico::Close, em * 1.8f, "Cancel")) {
+            j.prog->cancel = true;  // also wakes a paused worker so it can stop
+            j.setPaused(false, ImGui::GetTime());
+        }
         ImGui::PopID();
         ImGui::Dummy(ImVec2(0, em * 0.2f));
     }
@@ -2413,6 +2459,24 @@ void App::drawSettings() {
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, em * 0.6f));
     }
+    caption("PERFORMANCE");
+    if (toggle("Maximum performance while compressing and extracting", &maxPerf_)) {
+        prefs::setBool("MaxPerformance", maxPerf_);
+        kz::perf::setMaxPerformance(maxPerf_);
+        updateBoost();  // applies to (or releases) a job that is already running
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, col::Dim);
+#ifdef _WIN32
+    ImGui::TextWrapped("While a job runs, Kompressor uses every core at high priority, stops Windows from throttling "
+                       "it onto efficiency cores or lower clocks, switches to the High performance power plan (yours "
+                       "comes back afterwards) and keeps the PC awake. The PC may feel slower and run hotter and louder "
+                       "meanwhile. It does not overclock: clock limits stay as your BIOS sets them.");
+#else
+    ImGui::TextWrapped("While a job runs, Kompressor lets more threads work in parallel by using more of the free "
+                       "memory. The computer may feel slower and run hotter meanwhile.");
+#endif
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, em * 0.6f));
     caption("INTERFACE");
     toggle("Show the activity panel", &showActivity_);
     ImGui::Dummy(ImVec2(0, em * 0.4f));

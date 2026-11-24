@@ -375,7 +375,10 @@ DoneBlock compressJob(PendingBlock pb, Mode mode, Progress* prog) {
     auto tick = [&](size_t k) {
         k = std::min(k, n - reported);
         reported += k;
-        if (prog) prog->pending -= (int64_t)k;
+        if (prog) {
+            prog->pending -= (int64_t)k;
+            prog->waitWhilePaused();  // context mixing ticks every 64 KiB: pause mid-block
+        }
     };
     struct Settle {
         std::function<void()> f;
@@ -872,7 +875,10 @@ struct Reader::Impl {
         auto out = std::make_shared<std::vector<uint8_t>>();
         Progress* pr = workProg;
         cm::Tick tick;
-        if (pr) tick = [pr](size_t k) { pr->workDone += k; };
+        if (pr) tick = [pr](size_t k) {
+            pr->workDone += k;
+            pr->waitWhilePaused();
+        };
         if (!decompressBlock(b, packed.data(), *out, r.err, tick)) return r;
         if (pr && b.codec != CodecCm) pr->workDone += b.raw;
         if (XXH3_64bits(out->data(), out->size()) != b.hash) {

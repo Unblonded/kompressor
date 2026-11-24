@@ -4,6 +4,10 @@
 #include <cctype>
 
 #include "kz_common.hpp"
+#include "kz_sniff.hpp"
+
+#include <filesystem>
+#include <fstream>
 
 namespace kz {
 
@@ -109,6 +113,20 @@ bool looksLikeArchive(const std::string& name) {
     for (const char* x : exts)
         if (e == x) return true;
     return false;
+}
+
+Sniffed sniffFile(const std::string& path) {
+    std::ifstream f(u8path(path), std::ios::binary);
+    if (!f) return {};
+    std::vector<uint8_t> buf(kSniffBytes);
+    f.read((char*)buf.data(), (std::streamsize)buf.size());
+    return sniff(buf.data(), (size_t)f.gcount());
+}
+
+bool isArchiveFile(const std::string& path) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(u8path(path), ec)) return false;
+    return (bool)sniffFile(path) || looksLikeArchive(path);
 }
 
 }  // namespace kz

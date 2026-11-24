@@ -346,6 +346,13 @@ void drawIco(ImDrawList* dl, Ico ic, ImVec2 p, float s, ImU32 c) {
             dl->AddLine(P(0.24f, 0.24f), P(0.76f, 0.76f), c, t);
             dl->AddLine(P(0.76f, 0.24f), P(0.24f, 0.76f), c, t);
             break;
+        case Ico::Pause:
+            dl->AddRectFilled(P(0.28f, 0.22f), P(0.42f, 0.78f), c, s * 0.03f);
+            dl->AddRectFilled(P(0.58f, 0.22f), P(0.72f, 0.78f), c, s * 0.03f);
+            break;
+        case Ico::Play:
+            dl->AddTriangleFilled(P(0.32f, 0.20f), P(0.32f, 0.80f), P(0.80f, 0.50f), c);
+            break;
         case Ico::Up:
             dl->AddLine(P(0.50f, 0.16f), P(0.50f, 0.86f), c, t);
             dl->AddPolyline(std::array<ImVec2, 3>{P(0.22f, 0.44f), P(0.50f, 0.16f), P(0.78f, 0.44f)}.data(), 3, c, 0, t);

@@ -1,4 +1,5 @@
 #include "kz_common.hpp"
+#include "kz_perf.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -297,8 +298,10 @@ unsigned threadsFor(uint64_t bytesPerThread, int requested) {
     if (requested > 0) return (unsigned)requested;
     unsigned hw = hardwareThreads();
     uint64_t avail = availableMemory();
-    // Use most of the free memory (leave a quarter for the rest of the system), at least 1 GiB.
-    uint64_t budget = avail ? std::max<uint64_t>(avail / 4 * 3, 1ull << 30) : (4ull << 30);
+    // Use most of the free memory (leave a quarter for the rest of the system; a tenth in maximum
+    // performance mode), at least 1 GiB.
+    uint64_t share = perf::maxPerformance() ? avail / 10 * 9 : avail / 4 * 3;
+    uint64_t budget = avail ? std::max<uint64_t>(share, 1ull << 30) : (4ull << 30);
     uint64_t byMem = bytesPerThread ? budget / bytesPerThread : hw;
     return (unsigned)std::max<uint64_t>(1, std::min<uint64_t>(hw, byMem));
 }

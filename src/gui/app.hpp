@@ -34,6 +34,16 @@ struct Job {
     std::function<void(Job&)> onDone;
     double started = 0.0;
     bool visible = true;  // listed in the activity panel
+    // Pausing (the flag the worker waits on is prog->paused). Elapsed time leaves paused stretches out.
+    double pausedSince = 0.0, pausedTotal = 0.0;
+    bool paused() const { return prog->paused.load(); }
+    void setPaused(bool on, double now) {
+        if (on == paused()) return;
+        if (on) pausedSince = now;
+        else pausedTotal += now - pausedSince;
+        prog->paused = on;
+    }
+    double elapsed(double now) const { return (paused() ? pausedSince : now) - started - pausedTotal; }
 };
 
 struct Node {
@@ -133,6 +143,7 @@ private:
     void computeRows(ExplorerTab& t);
     void requestPreview(ExplorerTab& t, int node);
     void openNested(ExplorerTab& t, int node);
+    bool nestedArchive(const ExplorerTab& t, int node) const;
     std::vector<std::string> selectedPaths(ExplorerTab& t, bool& any);
     // Opens folder `dir` in the tab; `record` adds the folder being left to the Back history.
     void navigateTo(ExplorerTab& t, int dir, int select = -1, bool record = true);
@@ -208,6 +219,8 @@ private:
     bool debugDetach_ = false, debugRecompress_ = false;
     std::string lastDir_;
     bool shellMenu_ = false;  // Explorer right-click menu installed
+    bool maxPerf_ = false;    // Settings: maximum performance while compressing / extracting
+    void updateBoost();
     int directJobs_ = 0;  // extractFile() / quickCompress() jobs still running or waiting for a password
     bool directFailed_ = false, quitWhenDone_ = false;
 

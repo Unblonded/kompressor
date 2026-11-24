@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "kz_common.hpp"
+#include "kz_perf.hpp"
 #include "kz_pool.hpp"
 
 namespace kz {
@@ -71,7 +72,7 @@ public:
         // xz's own default is 3 x dictionary per block, which leaves big inputs with a handful of
         // blocks; cap it so every thread gets work.
         mt.block_size = perCore(sizeHint, t, 1 * MiB, 3ull * o.dict_size, 3ull * o.dict_size);
-        uint64_t budget = availableMemory() / 4 * 3;
+        uint64_t budget = perf::maxPerformance() ? availableMemory() / 10 * 9 : availableMemory() / 4 * 3;
         for (mt.threads = t; mt.threads > 1; --mt.threads)
             if (!budget || lzma_stream_encoder_mt_memusage(&mt) <= budget) break;
         if (lzma_stream_encoder_mt(&s_, &mt) != LZMA_OK) {

@@ -81,6 +81,7 @@ add_library(kompressor_core STATIC
   src/core/kz_cm.cpp
   src/core/kz_advisor.cpp
   src/core/kz_rar.cpp
+  src/core/kz_perf.cpp
 )
 target_include_directories(kompressor_core PUBLIC src/core PRIVATE ${xxhash_SOURCE_DIR})
 target_link_libraries(kompressor_core PUBLIC LibArchive::LibArchive LibLZMA::LibLZMA ZLIB::ZLIB ${KZ_ZSTD_TARGET})
@@ -92,7 +93,7 @@ endif()
 target_compile_definitions(kompressor_core PUBLIC KZ_VERSION="${PROJECT_VERSION}")
 if(WIN32)
   target_compile_definitions(kompressor_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
-  target_link_libraries(kompressor_core PUBLIC shell32)
+  target_link_libraries(kompressor_core PUBLIC shell32 powrprof ole32)
 endif()
 if(MSVC)
   target_compile_options(kompressor_core PUBLIC /utf-8 /W3)
@@ -166,6 +167,7 @@ if(KOMPRESSOR_BUILD_GUI)
     src/gui/app_icon.cpp
     src/gui/file_dialog.cpp
     src/gui/native_files.cpp
+    src/gui/prefs.cpp
     src/gui/shell_integration.cpp
     src/gui/theme.cpp
     src/gui/window_frame.cpp)

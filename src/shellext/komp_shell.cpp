@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "komp_shell_common.hpp"
+#include "../core/kz_sniff.hpp"
 
 namespace {
 
@@ -96,7 +97,19 @@ std::wstring menuText(std::wstring s) {
     return r;
 }
 
-bool isArchive(const std::wstring& path) {
+// An archive by its content, whatever its name: reads the first ~32 KB (ISO 9660's signature is that far in).
+bool isArchiveByContent(const std::wstring& path) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    std::vector<uint8_t> buf(kz::kSniffBytes);
+    DWORD got = 0;
+    BOOL ok = ReadFile(f, buf.data(), (DWORD)buf.size(), &got, nullptr);
+    CloseHandle(f);
+    return ok && (bool)kz::sniff(buf.data(), got);
+}
+
+bool isArchiveName(const std::wstring& path) {
     size_t slash = path.find_last_of(L"\\/"), dot = path.find_last_of(L'.');
     if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return false;
     std::wstring ext = lower(path.substr(dot + 1));
@@ -201,10 +214,17 @@ public:
         }
         ReleaseStgMedium(&sm);
         // Archives get Open / Extract on top; a selection with anything else only gets the compress entries.
+        // A file counts by its name or, for up to 32 selected items (so right-clicking stays instant), by its
+        // content: a misnamed archive still gets Open / Extract.
         archives_ = !paths_.empty();
+        bool readContent = paths_.size() <= 32;
         for (auto& p : paths_) {
             DWORD a = GetFileAttributesW(p.c_str());
-            if ((a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) || !isArchive(p)) archives_ = false;
+            bool dir = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+            if (dir || !(isArchiveName(p) || (readContent && isArchiveByContent(p)))) {
+                archives_ = false;
+                break;
+            }
         }
         return paths_.empty() ? E_INVALIDARG : S_OK;
     }

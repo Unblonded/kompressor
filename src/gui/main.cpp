@@ -28,6 +28,7 @@
 #include "shell_integration.hpp"
 #include "kmp.hpp"
 #include "kz_archive.hpp"
+#include "kz_perf.hpp"
 #include "native_files.hpp"
 #include "theme.hpp"
 #include "window_frame.hpp"
@@ -269,6 +270,7 @@ int main(int argc, char** argv) {
     glfwSetWindowContentScaleCallback(window, [](GLFWwindow*, float x, float) { g_pendingScale = x; });
 
     kzgui::native::init();  // OLE: dragging files out, file clipboard
+    kz::perf::recoverPowerPlan();  // a crash during a boosted job may have left the power plan switched
     {
         kzgui::App app(window, mono, uiScale);
         g_app = &app;
@@ -281,11 +283,7 @@ int main(int argc, char** argv) {
         // Files passed on the command line / "Open with": archives open, anything else is queued to compress.
         std::vector<std::string> toCompress;
         for (size_t i = 1; i < args.size(); ++i) {
-            kz::Source s;
-            s.path = args[i];
-            std::error_code ec;
-            if (std::filesystem::is_regular_file(kz::u8path(args[i]), ec) &&
-                (kz::looksLikeArchive(args[i]) || kz::kmp::isKmp(s)))
+            if (kz::isArchiveFile(args[i]))  // by content too, so a misnamed archive still opens
                 app.openArchive(args[i]);
             else if (args[i].rfind("-psn_", 0) != 0)  // ignore old macOS process serial args
                 toCompress.push_back(args[i]);

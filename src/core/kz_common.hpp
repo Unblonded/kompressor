@@ -2,11 +2,13 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace kz {
@@ -26,8 +28,18 @@ public:
     std::atomic<uint64_t> workTotal{0}, workDone{0};
     std::atomic<bool> cancel{false};
     std::atomic<bool> needPassword{false};
+    // Pause: every worker already calls cancelled() regularly, so that is where it waits while paused.
+    // Codec threads busy on a block finish that block first (context-mixing ones check every 64 KiB).
+    std::atomic<bool> paused{false};
 
-    bool cancelled() const { return cancel.load(std::memory_order_relaxed); }
+    bool cancelled() const {
+        waitWhilePaused();
+        return cancel.load(std::memory_order_relaxed);
+    }
+    void waitWhilePaused() const {
+        while (paused.load(std::memory_order_relaxed) && !cancel.load(std::memory_order_relaxed))
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     float fraction() const {
         uint64_t t = total.load();
         int64_t d = (int64_t)done.load() - pending.load();

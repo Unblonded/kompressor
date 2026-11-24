@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "kz_sniff.hpp"
+
 namespace kz {
 
 enum class OutFormat {
@@ -47,5 +49,10 @@ std::string withFormatExtension(const std::string& path, OutFormat f);
 const std::vector<std::pair<std::string, std::string>>& readableFormats();
 // True when a file name looks like something Kompressor can open.
 bool looksLikeArchive(const std::string& name);
+// The archive format a file's content says it is (see kz_sniff.hpp); empty name = no signature found.
+Sniffed sniffFile(const std::string& path);
+// A regular file Kompressor can open: by its content, or failing that by its name (split parts after
+// the first carry no header).
+bool isArchiveFile(const std::string& path);
 
 }  // namespace kz

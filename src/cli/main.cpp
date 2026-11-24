@@ -12,6 +12,7 @@
 #include "kz_cm.hpp"
 #include "kz_advisor.hpp"
 #include "kz_archive.hpp"
+#include "kz_perf.hpp"
 
 #ifdef _WIN32
 #include <io.h>
@@ -39,7 +40,8 @@ static void usage() {
         "  kompressor-cli delete  <archive> <entry...> [-p password]   (remove entries and folders)\n"
         "  kompressor-cli advise  <files/folders...>   (which format suits these files, for each goal)\n"
         "  kompressor-cli formats\n\n"
-        "  create, super and convert also take -v <size> to split the result into parts (e.g. -v 100m, -v 4g)\n",
+        "  create, super and convert also take -v <size> to split the result into parts (e.g. -v 100m, -v 4g)\n"
+        "  --max-cpu   maximum performance: every core at high priority, no power throttling, fastest power plan\n",
         KZ_VERSION);
 }
 
@@ -111,7 +113,7 @@ int main(int argc, char** argv) {
     std::string password, outDir, mode = "ultra", encrypt, intoDir;
     int level = -1, threads = 0;
     uint64_t volumeSize = 0;
-    bool skipExisting = false, dedup = true;
+    bool skipExisting = false, dedup = true, maxCpu = false;
     for (size_t i = 2; i < args.size(); ++i) {
         const std::string& a = args[i];
         auto next = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : std::string(); };
@@ -132,11 +134,23 @@ int main(int argc, char** argv) {
         }
         else if (a == "--skip-existing") skipExisting = true;
         else if (a == "--no-dedup") dedup = false;
+        else if (a == "--max-cpu") maxCpu = true;
         else pos.push_back(a);
     }
 
     Progress prog;
     std::string err;
+
+    perf::recoverPowerPlan();
+    struct Boost {  // released on every way out of main()
+        explicit Boost(bool on) {
+            if (!on) return;
+            perf::setMaxPerformance(true);
+            perf::boost(true);
+            std::fprintf(stderr, "maximum performance: %s\n", perf::boostSummary().c_str());
+        }
+        ~Boost() { perf::boost(false); }
+    } boost(maxCpu);
 
     if (cmd == "kcm") {  // undocumented: benchmark the context-mixing codec on one file
         if (pos.size() < 2) return 1;

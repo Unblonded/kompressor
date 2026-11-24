@@ -8,7 +8,9 @@ A cross-platform (Windows · macOS · Linux) file compressor written in C++17 wi
 * **Recommends a format** for what you need (best overall, smallest, fastest, share with anyone, password-protected). Before compressing, it takes a quick look at the files: what kinds they are, how much is already compressed (a zstd probe over samples), and what's repeated. It shows an estimated size and time, and one click applies the recommendation. Recompressing uses the archive's own listing instead.
 * **Lets you browse an archive without extracting it**: a folder tree, search, a text/hex preview, extraction of selected items, and nested archives (a `.tar.gz` inside a `.zip` inside a `.deb`…) that open in memory.
 * **Works with files inside archives like a folder**: double-click a file to open it in its usual app, drag files out to the desktop or Explorer (or Ctrl+C them), and drop files onto an open archive (or Ctrl+V, or Add) to add them to the folder you're in. Delete removes entries. Edited archives are rewritten in their own format (KMP keeps its mode, encrypted ZIPs keep their password).
-* Integrity **Test**, password prompts, background jobs you can cancel, drag & drop.
+* **Recognises archives by their content**, not their name: a 7z called `.zip`, a ZIP called `.png` or an archive with no extension at all opens, extracts and gets the right-click entries as what it really is (also inside other archives), and Kompressor says what it really is.
+* Integrity **Test**, password prompts, background jobs you can **pause**, resume or cancel, drag & drop.
+* **Maximum performance** mode (Settings, or `--max-cpu` in the CLI): while a job runs it gets every core at high priority, Windows power throttling off, the fastest power plan (yours comes back afterwards) and no sleep.
 * A scriptable `kompressor-cli` built from the same core.
 
 ## The KMP super format

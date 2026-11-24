@@ -13,6 +13,8 @@
 #include "app_util.hpp"
 #include "theme.hpp"
 #include "shell_integration.hpp"
+#include "kz_perf.hpp"
+#include "prefs.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -142,6 +144,8 @@ App::App(GLFWwindow* window, ImFont* mono, float scale) : window_(window), mono_
     lastDir_ = FileDialog::homeDir();
     fileDlg_.setParent(window);
     shellMenu_ = shell::registered();
+    maxPerf_ = prefs::getBool("MaxPerformance", false);
+    kz::perf::setMaxPerformance(maxPerf_);
     startTempCleanup();
     log(col::Dim, std::string("Kompressor ") + KZ_VERSION + " ready. Drop files or archives onto the window.");
 }
@@ -150,11 +154,24 @@ App::~App() {
     for (auto& j : jobs_) j->prog->cancel = true;
     for (auto& j : jobs_)
         if (j->thread.joinable()) j->thread.join();
+    kz::perf::boost(false);  // priority, power plan and sleep back to normal
+}
+
+// Maximum performance mode only boosts while real work runs (compress, extract, test...), not for
+// listing or previews, and lets go as soon as it is idle again.
+void App::updateBoost() {
+    bool work = false;
+    for (auto& j : jobs_)
+        if (j->visible && !j->finished && !j->paused()) work = true;  // paused jobs don't need the CPU
+    bool want = maxPerf_ && work;
+    if (want == kz::perf::boosted()) return;
+    kz::perf::boost(want);
+    if (want) log(col::Dim, "Maximum performance: " + kz::perf::boostSummary() + ".");
 }
 
 bool App::busy() const {
     for (auto& j : jobs_)
-        if (!j->finished) return true;
+        if (!j->finished && !j->paused()) return true;  // a paused job has nothing to redraw
     return !toasts_.empty() || animating();
 }
 
@@ -282,6 +299,13 @@ void App::loadTab(int tabId) {
                     t->restoreSelect.clear();
                 }
                 if (!t->info.extra.empty() && !t->info.isKmp) log(col::Warn, title + ": " + t->info.extra);
+                // Opened by content: say so when the name points at another format (or none).
+                if (!t->src.inMemory()) {
+                    kz::Sniffed real = kz::sniffFile(t->src.path);
+                    if (real && !kz::nameFits(title.c_str(), real))
+                        log(col::Warn, title + " is really a " + real.name + " archive (its name says otherwise); opened it as " +
+                                           real.name + ". Renaming it to ." + real.ext + " lets other programs open it too.");
+                }
                 log(col::Dim, "Opened " + title + " (" + t->info.format + ", " + std::to_string(t->info.entries.size()) + " entries)");
             } else if (j.prog->needPassword && j.message != "Cancelled") {
                 t->error = "This archive is encrypted.";
@@ -533,10 +557,8 @@ void App::onDrop(const std::vector<std::string>& paths, ImVec2 at) {
         ExplorerTab* t = tabById(dropTab_);
         if (t && t->editable && !t->loading) {  // read-only archives keep the old behaviour below
             bool allArchives = true;
-            for (auto& p : paths) {
-                std::error_code ec;
-                if (!std::filesystem::is_regular_file(kz::u8path(p), ec) || !kz::looksLikeArchive(p)) allArchives = false;
-            }
+            for (auto& p : paths)
+                if (!kz::isArchiveFile(p)) allArchives = false;
             askAddFiles(*t, paths, allArchives);
             return;
         }
@@ -549,11 +571,7 @@ void App::onDrop(const std::vector<std::string>& paths, ImVec2 at) {
     }
     bool allArchives = true;
     for (auto& p : paths) {
-        std::error_code ec;
-        bool isFile = std::filesystem::is_regular_file(kz::u8path(p), ec);
-        kz::Source s;
-        s.path = p;
-        if (!isFile || !(kz::looksLikeArchive(p) || kz::kmp::isKmp(s))) allArchives = false;
+        if (!kz::isArchiveFile(p)) allArchives = false;  // by content, so misnamed archives open too
     }
     if (allArchives) {
         for (auto& p : paths) openArchive(p);
