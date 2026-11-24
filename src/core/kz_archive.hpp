@@ -8,6 +8,8 @@
 #include "kz_common.hpp"
 #include "kz_formats.hpp"
 
+struct archive;
+
 namespace kz {
 
 struct Entry {
@@ -41,6 +43,12 @@ struct ExtractOptions {
     bool skipExisting = false;
 };
 
+// Opens a libarchive reader on a source: memory, a single file, or every volume of a multi-volume
+// set. Returns the libarchive status code.
+int openReadSource(archive* r, const Source& src);
+// Total size of a source (all volumes of a set).
+uint64_t sourceSize(const Source& src);
+
 // Identifies whether a source can be opened at all (cheap: reads headers only).
 bool probeArchive(const Source& src, std::string& formatName);
 
@@ -73,6 +81,7 @@ struct CompressOptions {
     std::string password;    // ZIP only
     int threads = 0;         // 0 = auto
     bool dedup = true;       // KMP only
+    uint64_t volumeSize = 0; // >0: split the finished archive into .001, .002 ... parts of this size
 };
 
 struct CompressResult {
@@ -80,6 +89,7 @@ struct CompressResult {
     uint64_t outputBytes = 0;
     uint64_t files = 0;
     std::string summary;
+    std::vector<std::string> parts;  // the files written: the archive itself, or its .001 ... volumes
 };
 
 bool createArchive(const std::vector<std::string>& inputs, const std::string& outPath, const CompressOptions& opt,

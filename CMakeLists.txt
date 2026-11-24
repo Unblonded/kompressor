@@ -46,6 +46,8 @@ endif()
 
 find_package(LibArchive REQUIRED)
 find_package(LibLZMA REQUIRED)
+find_package(ZLIB REQUIRED)
+find_package(BZip2)
 
 find_package(zstd CONFIG QUIET)
 if(TARGET zstd::libzstd)
@@ -75,9 +77,17 @@ add_library(kompressor_core STATIC
   src/core/kz_archive.cpp
   src/core/kz_writer.cpp
   src/core/kmp.cpp
+  src/core/kz_parallel.cpp
+  src/core/kz_cm.cpp
+  src/core/kz_rar.cpp
 )
 target_include_directories(kompressor_core PUBLIC src/core PRIVATE ${xxhash_SOURCE_DIR})
-target_link_libraries(kompressor_core PUBLIC LibArchive::LibArchive LibLZMA::LibLZMA ${KZ_ZSTD_TARGET})
+target_link_libraries(kompressor_core PUBLIC LibArchive::LibArchive LibLZMA::LibLZMA ZLIB::ZLIB ${KZ_ZSTD_TARGET})
+if(BZip2_FOUND)
+  # Parallel .bz2 output; without it libarchive's single-threaded bzip2 filter is used.
+  target_link_libraries(kompressor_core PUBLIC BZip2::BZip2)
+  target_compile_definitions(kompressor_core PRIVATE KZ_HAVE_BZIP2)
+endif()
 target_compile_definitions(kompressor_core PUBLIC KZ_VERSION="${PROJECT_VERSION}")
 if(WIN32)
   target_compile_definitions(kompressor_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)

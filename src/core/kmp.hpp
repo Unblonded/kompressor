@@ -15,6 +15,12 @@
 //   * Per-stream codecs: LZMA2 with x86/ARM64 branch converters for executables, text-tuned LZMA2
 //     literal context for text, store/fast-zstd for media, and in Max mode every block is compressed
 //     with several candidates and the smallest wins.
+//   * Extreme mode replaces LZ with KCM, a context-mixing coder (see kz_cm.hpp): every bit is
+//     predicted by a dozen models mixed by online-trained networks. Several times slower in both
+//     directions, noticeably smaller on text, code and structured binaries.
+//   * Ultimate mode runs a heavier KCM (bit-history states, more models, mixers and SSE, 1 GiB
+//     tables) over blocks of up to 256 MiB, so the model learns from far more history. Built for
+//     archiving: expect a few hundred KB/s per stream, and several GiB of RAM.
 //   * Files are fed grouped by extension, then name, so related data lands in the same block.
 //   * The index lives at the end, so listing/exploring is instant and single files can be read
 //     with random access (only the blocks that hold them are decompressed).
@@ -30,7 +36,7 @@
 
 namespace kz::kmp {
 
-enum class Mode : int { Fast = 0, Balanced = 1, Ultra = 2, Max = 3 };
+enum class Mode : int { Fast = 0, Balanced = 1, Ultra = 2, Max = 3, Extreme = 4, Ultimate = 5 };
 const char* modeName(Mode m);
 
 struct Options {
@@ -38,6 +44,7 @@ struct Options {
     int threads = 0;          // 0 = auto (memory-aware)
     bool dedup = true;
     uint32_t blockSizeMB = 0; // 0 = auto for the mode
+    uint64_t sizeHint = 0;    // expected input bytes; small inputs get smaller blocks so every core works
 };
 
 enum class EntryType : uint8_t { File = 0, Dir = 1, Symlink = 2 };
@@ -98,6 +105,10 @@ public:
     bool readFile(size_t index, const std::function<bool(const uint8_t*, size_t)>& sink, Progress* prog,
                   std::string& err);
     int findEntry(const std::string& path) const;
+    // Call before reading files front to back (extract, test, convert): blocks are then decoded
+    // ahead on all cores.
+    // With `prog`, decoding progress is reported in its workDone/workTotal.
+    void setSequential(Progress* prog = nullptr);
 
 private:
     struct Impl;

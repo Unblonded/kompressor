@@ -114,6 +114,9 @@ void dialogHeader(const char* title, const char* subtitle, Ico ic, const ImVec4&
 // Floating dialog with a custom header (icon tile, title, subtitle, close button).
 bool beginDialog(const char* id, const char* title, const char* subtitle, Ico ic, bool* open, float width,
                  const ImVec4& tint = col::Accent);
+// Ends the scrolling body: whatever is drawn after this (separator, buttons) stays pinned at the
+// bottom of the dialog. Dialogs without buttons can skip it.
+void dialogFooter();
 void endDialog();
 // Moves the cursor so `width` of content ends at the right edge (footer buttons).
 void alignRight(float width);

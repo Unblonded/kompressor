@@ -19,6 +19,9 @@ struct GLFWwindow;
 
 namespace kzgui {
 
+// Bytes per part for the "Split into parts" presets (0 = 100 MB, 1 = 700 MB, 2 = FAT32, 3 = custom MB).
+uint64_t splitBytes(int preset, int customMb);
+
 struct Job {
     int id = 0;
     std::string title;
@@ -170,7 +173,6 @@ private:
     bool showAbout_ = false;
     bool showSettings_ = false;
     bool debugDetach_ = false, debugRecompress_ = false;
-    bool showDemo_ = false;
     std::string lastDir_;
     bool shellMenu_ = false;  // Explorer right-click menu installed
     int directExtracts_ = 0;  // extractFile() jobs still running or waiting for a password
@@ -187,6 +189,8 @@ private:
         int threads = 0;
         bool dedup = true;
         bool openWhenDone = true;
+        bool split = false;
+        int splitPreset = 0, splitCustomMb = 1024;
     } cmp_;
 
     struct ExtractState {
@@ -210,8 +214,11 @@ private:
         int mode = 2;    // KMP mode
         bool dedup = true;
         bool openWhenDone = true;
+        bool split = false;
+        int splitPreset = 0, splitCustomMb = 1024;
         char pw[256] = {}, pw2[256] = {};
     } conv_;
+    void drawSplitOption(bool* on, int* preset, int* customMb, float inner);
 
     struct PasswordState {
         bool request = false;

@@ -688,10 +688,26 @@ void kvRow(const char* key, const char* value, float keyWidth) {
     ImGui::TextWrapped("%s", value);
 }
 
+namespace {
+bool g_dlgBody = false, g_dlgInFooter = false;
+float g_dlgFooterY = 0.0f;
+ImGuiID g_dlgFooterKey = 0;
+}  // namespace
+
 bool beginDialog(const char* id, const char* title, const char* subtitle, Ico ic, bool* open, float width, const ImVec4& tint) {
     const float e = em();
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    // Keep it centred for its first few frames: the scrolling body needs a frame or two to measure
+    // itself, and centring only on the first (smaller) size would push the dialog off the bottom.
+    {
+        static std::unordered_map<ImGuiID, int> age;
+        ImGuiID key = ImGui::GetID(id);
+        ImGuiWindow* w = ImGui::FindWindowByName(id);
+        int& a = age[key];
+        if (!w || !w->WasActive) a = 0;
+        ImGui::SetNextWindowPos(vp->GetCenter(), a < 4 ? ImGuiCond_Always : ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ++a;
+    }
     ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0), ImVec2(width, vp->WorkSize.y * 0.94f));
     // A dialog dragged out into its own OS window lets the OS draw the rounded corners and shadow;
     // ImGui's own rounding would leave unpainted corners there.
@@ -710,11 +726,42 @@ bool beginDialog(const char* id, const char* title, const char* subtitle, Ico ic
     if (!vis) return false;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
-    dl->PushClipRectFullScreen();
-    softShadow(dl, wp, ImVec2(wp.x + ws.x, wp.y + ws.y), ImGui::GetStyle().WindowRounding, e * 1.6f, 0.55f);
-    dl->PopClipRect();
+    if (!detached) {  // in its own OS window the shadow would land inside it; DWM draws the real one
+        dl->PushClipRectFullScreen();
+        softShadow(dl, wp, ImVec2(wp.x + ws.x, wp.y + ws.y), ImGui::GetStyle().WindowRounding, e * 1.6f, 0.55f);
+        dl->PopClipRect();
+    }
     dialogHeader(title, subtitle, ic, tint, width, open);
+
+    // The body scrolls when the dialog would not fit on screen; header and footer stay put. Its height
+    // is capped by what is left after the header and the footer (measured on the previous frame).
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    ImGuiID footKey = ImGui::GetID("##footerH");
+    float footer = win->StateStorage.GetFloat(footKey, e * 4.0f);
+    float maxWin = vp->WorkSize.y * 0.94f;
+    float used = ImGui::GetCursorPosY() + footer + ImGui::GetStyle().WindowPadding.y;
+    float maxBody = std::max(e * 6.0f, maxWin - used);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxBody));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, e * 0.55f);
+    ImGui::BeginChild("##dlgbody", ImVec2(ImGui::GetContentRegionAvail().x, 0),
+                      ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_None);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - e * 3.0f);
+    g_dlgBody = true;
+    g_dlgFooterKey = footKey;
     return true;
+}
+
+void dialogFooter() {
+    if (!g_dlgBody) return;
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    g_dlgBody = false;
+    g_dlgFooterY = ImGui::GetCursorPosY();
+    g_dlgInFooter = true;
 }
 
 void dialogHeader(const char* title, const char* subtitle, Ico ic, const ImVec4& tint, float width, bool* open) {
@@ -868,6 +915,14 @@ void drawLogo(ImDrawList* dl, ImVec2 p, float s) {
 }
 
 void endDialog() {
+    if (g_dlgBody) {
+        dialogFooter();
+        g_dlgFooterY = ImGui::GetCursorPosY();  // no footer: nothing to reserve
+    }
+    if (g_dlgInFooter) {
+        ImGui::GetCurrentWindow()->StateStorage.SetFloat(g_dlgFooterKey, ImGui::GetCursorPosY() - g_dlgFooterY);
+        g_dlgInFooter = false;
+    }
     ImGui::PopTextWrapPos();
     ImGui::End();
 }

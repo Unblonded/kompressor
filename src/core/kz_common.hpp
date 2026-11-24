@@ -18,15 +18,27 @@ class Progress {
 public:
     std::atomic<uint64_t> done{0};
     std::atomic<uint64_t> total{0};
+    // Bytes already counted in `done` (read from the input) that a compressor still holds in its
+    // queue: worker threads can lag far behind the reader, and the bar should show real work.
+    std::atomic<int64_t> pending{0};
+    // Decoding work (extract/test of big blocks): when set, the bar follows it rather than only the
+    // bytes handed out, which stall while a block decodes.
+    std::atomic<uint64_t> workTotal{0}, workDone{0};
     std::atomic<bool> cancel{false};
     std::atomic<bool> needPassword{false};
 
     bool cancelled() const { return cancel.load(std::memory_order_relaxed); }
     float fraction() const {
-        uint64_t t = total.load(), d = done.load();
-        if (t == 0) return 0.0f;
-        double f = double(d) / double(t);
-        return float(f > 1.0 ? 1.0 : f);
+        uint64_t t = total.load();
+        int64_t d = (int64_t)done.load() - pending.load();
+        double f = t == 0 ? 0.0 : double(d < 0 ? 0 : d) / double(t);
+        if (f > 1.0) f = 1.0;
+        uint64_t wt = workTotal.load();
+        if (wt) {
+            double w = double(workDone.load()) / double(wt);
+            f = 0.85 * (w > 1.0 ? 1.0 : w) + 0.15 * f;
+        }
+        return float(f);
     }
     void setStatus(std::string s) {
         std::lock_guard<std::mutex> l(m_);
@@ -94,6 +106,24 @@ std::string formatTime(int64_t unixTime);
 std::string formatDuration(double seconds);
 
 unsigned hardwareThreads();
+// Physical memory currently available, in bytes (0 when unknown).
+uint64_t availableMemory();
+// Worker count for jobs that each need `bytesPerThread` of memory: every core, as long as the jobs
+// fit in most of the free RAM. `requested` > 0 overrides.
+unsigned threadsFor(uint64_t bytesPerThread, int requested = 0);
+
+// --- multi-volume sets ----------------------------------------------------------
+// Every file of the multi-volume set `path` belongs to, first volume first: "x.part1.rar"...,
+// "x.7z.001"..., or old-style "x.rar" + "x.r00"... Any volume may be passed. Empty when `path` is
+// not part of a set of two or more.
+std::vector<std::string> volumeSet(const std::string& path);
+// The first volume of the set `path` belongs to, or `path` itself.
+std::string firstVolume(const std::string& path);
+// True for names that look like a volume of a split archive (".001", ".part2.rar", ".r00").
+bool looksLikeVolume(const std::string& name);
+// Splits a finished file into "<path>.001", ".002"... of `volumeSize` bytes (the original becomes
+// part 1). A file that already fits is left as it is. `parts` receives the resulting file names.
+bool splitIntoVolumes(const std::string& path, uint64_t volumeSize, std::vector<std::string>& parts, std::string& err);
 
 // Makes libarchive's narrow-string conversions UTF-8 aware. Call once at startup.
 void initLocale();

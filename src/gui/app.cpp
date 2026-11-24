@@ -669,6 +669,15 @@ void App::runTest(int tabId) {
 }
 
 
+uint64_t splitBytes(int preset, int customMb) {
+    switch (preset) {
+        case 0: return 100ull << 20;
+        case 1: return 700ull << 20;
+        case 2: return 4095ull << 20;  // FAT32 cannot hold a file of 4 GiB or more
+        default: return (uint64_t)std::max(1, customMb) << 20;
+    }
+}
+
 void App::actionConvert(ExplorerTab& t, bool super) {
     ConvertState c;
     c.open = true;
@@ -676,6 +685,9 @@ void App::actionConvert(ExplorerTab& t, bool super) {
     c.tabId = t.id;
     c.dedup = conv_.dedup;
     c.openWhenDone = conv_.openWhenDone;
+    c.split = conv_.split;
+    c.splitPreset = conv_.splitPreset;
+    c.splitCustomMb = conv_.splitCustomMb;
     // Default target: KMP for "super", otherwise 7Z for ZIP sources and ZIP for everything else.
     kz::OutFormat want = super ? kz::OutFormat::Kmp : kz::OutFormat::Zip;
     std::string fmt = lower(t.info.format);
@@ -684,7 +696,16 @@ void App::actionConvert(ExplorerTab& t, bool super) {
     c.level = kz::formatDesc(want).defLevel;
     c.mode = 2;
     std::string base = t.src.inMemory() ? lastDir_ : parentDir(t.src.path);
-    std::string stem = kz::stripArchiveExt(t.src.name());
+    std::string name = t.src.name();
+    // "data.7z.001" / "data.part1.rar" -> "data.7z" / "data.rar" before the archive extension comes off.
+    if (kz::looksLikeVolume(name)) {
+        size_t dot = name.find_last_of('.');
+        std::string tail = name.substr(dot + 1);
+        if (!tail.empty() && tail.find_first_not_of("0123456789") == std::string::npos) name.erase(dot);
+        size_t part = lower(name).rfind(".part");
+        if (part != std::string::npos && name.find('.', part + 1) != std::string::npos) name.erase(part, name.find('.', part + 1) - part);
+    }
+    std::string stem = kz::stripArchiveExt(name);
     std::string out = kz::pathToUtf8(kz::u8path(base) / kz::u8path(stem + kz::formatDesc(want).ext));
     if (!t.src.inMemory() && kz::u8path(out) == kz::u8path(t.src.path))
         out = kz::pathToUtf8(kz::u8path(base) / kz::u8path(stem + "-recompressed" + kz::formatDesc(want).ext));
@@ -713,7 +734,7 @@ void App::runConvert(int tabId, std::string out, kz::CompressOptions o, bool ope
                     std::snprintf(buf, sizeof buf, " (%s -> %s)", kz::humanSize(before).c_str(), kz::humanSize(res->outputBytes).c_str());
                 log(col::Ok, "Recompressed " + title + " to " + kz::fileNameOf(out) + buf, out, out);
                 toast(col::Ok, "Created " + kz::fileNameOf(out) + buf);
-                if (openWhenDone) openArchive(out);
+                if (openWhenDone) openArchive(res->parts.empty() ? out : res->parts.front());
             } else if (j.prog->needPassword) {
                 askPassword("\"" + title + "\" is encrypted. Enter its password to recompress it:",
                             [this, tabId, out, o, openWhenDone](const std::string& p) {
@@ -735,6 +756,7 @@ void App::runCompress() {
     o.password = fd.password ? cmp_.pw : "";
     o.threads = cmp_.threads;
     o.dedup = cmp_.dedup;
+    o.volumeSize = cmp_.split ? splitBytes(cmp_.splitPreset, cmp_.splitCustomMb) : 0;
     std::vector<std::string> inputs = cmp_.inputs;
     std::string out = cmp_.out;
     bool openAfter = cmp_.openWhenDone;
@@ -747,7 +769,7 @@ void App::runCompress() {
             if (j.ok) {
                 log(col::Ok, "Created " + kz::fileNameOf(out) + ": " + res->summary, out, out);
                 toast(col::Ok, "Created " + kz::fileNameOf(out) + " - " + kz::humanSize(res->outputBytes));
-                if (openAfter) openArchive(out);
+                if (openAfter) openArchive(res->parts.empty() ? out : res->parts.front());
             } else {
                 log(col::Error, "Compression failed: " + j.message);
                 toast(col::Error, "Compression failed: " + j.message);

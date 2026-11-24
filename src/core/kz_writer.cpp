@@ -11,6 +11,8 @@
 
 #include "kmp.hpp"
 #include "kz_archive.hpp"
+#include "kz_parallel.hpp"
+#include "kz_rar.hpp"
 
 namespace kz {
 
@@ -64,9 +66,10 @@ std::string ratioText(uint64_t in, uint64_t out) {
 bool createKmp(const std::vector<InputItem>& items, const std::string& outPath, const CompressOptions& opt,
                Progress& prog, CompressResult& res, std::string& err) {
     kmp::Options ko;
-    ko.mode = (kmp::Mode)std::clamp(opt.level < 0 ? 2 : opt.level, 0, 3);
+    ko.mode = (kmp::Mode)std::clamp(opt.level < 0 ? 2 : opt.level, 0, 5);
     ko.threads = opt.threads;
     ko.dedup = opt.dedup;
+    for (auto& i : items) ko.sizeHint += i.size;
 
     std::string tmp = tmpPathFor(outPath);
     kmp::Writer w;
@@ -145,13 +148,14 @@ bool setOpt(archive* a, const std::string& o, std::string& err, bool required = 
     return true;
 }
 
-bool configureWriter(archive* a, const CompressOptions& opt, std::string& err) {
+bool configureWriter(archive* a, const CompressOptions& opt, std::string& err, bool external = false) {
     const FormatDesc& fd = formatDesc(opt.format);
     int level = opt.level < 0 ? fd.defLevel : std::clamp(opt.level, fd.minLevel, fd.maxLevel);
     std::string lv = std::to_string(level);
     std::string th = std::to_string(opt.threads > 0 ? opt.threads : (int)hardwareThreads());
 
     auto addFilter = [&](OutFormat f) -> bool {
+        if (external) return true;  // compressed by a StreamCompressor instead
         switch (f) {
             case OutFormat::TarGz: case OutFormat::Gz:
                 archive_write_add_filter_gzip(a);
@@ -231,6 +235,130 @@ bool configureWriter(archive* a, const CompressOptions& opt, std::string& err) {
     return false;
 }
 
+// libarchive writes the plain tar (or raw) stream into a StreamCompressor, which compresses it on
+// every core. Formats without one write straight to the file with libarchive's own filter.
+la_ssize_t streamWrite(archive*, void* ctx, const void* buf, size_t n) {
+    return static_cast<StreamCompressor*>(ctx)->write(buf, n) ? (la_ssize_t)n : -1;
+}
+int streamClose(archive*, void* ctx) { return static_cast<StreamCompressor*>(ctx)->finish() ? ARCHIVE_OK : ARCHIVE_FATAL; }
+
+struct LaOutput {
+    archive* a = nullptr;
+    std::unique_ptr<StreamCompressor> comp;
+    ~LaOutput() {
+        if (a) archive_write_free(a);
+    }
+    bool open(const CompressOptions& opt, const std::string& tmp, uint64_t sizeHint, Progress& prog, std::string& err) {
+        std::string cerr;
+        comp = makeStreamCompressor(opt.format, opt.level, opt.threads, sizeHint, tmp, cerr);
+        if (comp) comp->setProgress(&prog);
+        if (!comp && !cerr.empty()) {
+            err = cerr;
+            return false;
+        }
+        a = archive_write_new();
+        if (!configureWriter(a, opt, err, comp != nullptr)) return false;
+        int rc;
+        if (comp) {
+            if (formatDesc(opt.format).singleFile) archive_write_set_bytes_in_last_block(a, 1);  // no tar padding
+            rc = archive_write_open2(a, comp.get(), nullptr, streamWrite, streamClose, nullptr);
+        } else {
+#ifdef _WIN32
+            rc = archive_write_open_filename_w(a, u8path(tmp).wstring().c_str());
+#else
+            rc = archive_write_open_filename(a, tmp.c_str());
+#endif
+        }
+        if (rc != ARCHIVE_OK) {
+            err = archive_error_string(a) ? archive_error_string(a) : "cannot create output";
+            return false;
+        }
+        return true;
+    }
+    bool close(std::string& err) {
+        if (archive_write_close(a) != ARCHIVE_OK) {
+            err = comp && !comp->error().empty() ? comp->error()
+                                                 : (archive_error_string(a) ? archive_error_string(a) : "close failed");
+            return false;
+        }
+        return true;
+    }
+};
+
+// Opens the writer for formats Kompressor writes itself (7z multithreaded, RAR5 stored).
+std::unique_ptr<ArchiveWriter> openDirectWriter(const CompressOptions& opt, const std::string& tmp, uint64_t sizeHint,
+                                                std::string& err) {
+    if (opt.format == OutFormat::SevenZip) {
+        auto w = std::make_unique<SevenZipWriter>();
+        if (!w->open(tmp, opt.level < 0 ? formatDesc(OutFormat::SevenZip).defLevel : opt.level, opt.threads, sizeHint, err))
+            return nullptr;
+        return w;
+    }
+    if (opt.format == OutFormat::Rar) {
+        auto w = std::make_unique<RarWriter>();
+        if (!w->open(tmp, err)) return nullptr;
+        return w;
+    }
+    return nullptr;
+}
+bool writesDirectly(OutFormat f) { return f == OutFormat::SevenZip || f == OutFormat::Rar; }
+
+// 7z / RAR, reading files from disk.
+bool createDirect(const std::vector<InputItem>& items, const std::string& outPath, const CompressOptions& opt,
+                  Progress& prog, CompressResult& res, std::string& err) {
+    uint64_t total = 0;
+    for (auto& i : items) total += i.size;
+    std::string tmp = tmpPathFor(outPath);
+    std::unique_ptr<ArchiveWriter> wp = openDirectWriter(opt, tmp, total, err);
+    if (!wp) return false;
+    ArchiveWriter& w = *wp;
+    w.setProgress(&prog);
+    prog.total = total;
+    prog.done = 0;
+    std::vector<char> buf(kIoBuf);
+    for (auto& it : items) {
+        if (prog.cancelled()) {
+            w.abort();
+            err = "Cancelled";
+            return false;
+        }
+        prog.setStatus(it.arcPath);
+        if (it.isDir) {
+            w.addDir(it.arcPath, it.mode, it.mtime);
+            continue;
+        }
+        if (it.isSymlink) {
+            w.addSymlink(it.arcPath, it.linkTarget, it.mtime);
+            continue;
+        }
+        std::ifstream in(it.source, std::ios::binary);
+        if (!in) {
+            prog.warn("Cannot read " + pathToUtf8(it.source) + " (skipped)");
+            prog.done += it.size;
+            continue;
+        }
+        w.beginFile(it.arcPath, it.mode, it.mtime);
+        while (in) {
+            in.read(buf.data(), (std::streamsize)buf.size());
+            std::streamsize n = in.gcount();
+            if (n <= 0) break;
+            if (!w.write(buf.data(), (size_t)n)) {
+                err = w.error();
+                w.abort();
+                return false;
+            }
+            prog.done += (uint64_t)n;
+            if (prog.cancelled()) break;
+        }
+    }
+    prog.setStatus(opt.format == OutFormat::Rar ? "Finishing RAR..." : "Finishing 7z...");
+    if (!w.finish(err)) return false;
+    if (!commitTemp(tmp, outPath, err)) return false;
+    fillResult(res, items, outPath);
+    res.summary = ratioText(res.inputBytes, res.outputBytes);
+    return true;
+}
+
 bool createLibarchive(const std::vector<InputItem>& items, const std::string& outPath, const CompressOptions& opt,
                       Progress& prog, CompressResult& res, std::string& err) {
     const FormatDesc& fd = formatDesc(opt.format);
@@ -247,26 +375,18 @@ bool createLibarchive(const std::vector<InputItem>& items, const std::string& ou
         err = std::string(fd.name) + " does not support passwords - use ZIP for encryption";
         return false;
     }
-
-    archive* a = archive_write_new();
-    if (!configureWriter(a, opt, err)) {
-        archive_write_free(a);
-        return false;
-    }
-    std::string tmp = tmpPathFor(outPath);
-#ifdef _WIN32
-    int rc = archive_write_open_filename_w(a, u8path(tmp).wstring().c_str());
-#else
-    int rc = archive_write_open_filename(a, tmp.c_str());
-#endif
-    if (rc != ARCHIVE_OK) {
-        err = archive_error_string(a) ? archive_error_string(a) : "cannot create output";
-        archive_write_free(a);
-        return false;
-    }
+    if (writesDirectly(opt.format)) return createDirect(items, outPath, opt, prog, res, err);
 
     uint64_t total = 0;
     for (auto& i : items) total += i.size;
+    std::string tmp = tmpPathFor(outPath);
+    LaOutput lo;
+    if (!lo.open(opt, tmp, total, prog, err)) {
+        lo.comp.reset();
+        discardTemp(tmp);
+        return false;
+    }
+    archive* a = lo.a;
     prog.total = total;
     prog.done = 0;
 
@@ -351,15 +471,14 @@ bool createLibarchive(const std::vector<InputItem>& items, const std::string& ou
     if (ok && !prog.cancelled()) {
         if (opt.format == OutFormat::SevenZip || opt.format == OutFormat::Iso)
             prog.setStatus("Finalizing (compressing solid stream)...");
-        if (archive_write_close(a) != ARCHIVE_OK) {
-            err = archive_error_string(a) ? archive_error_string(a) : "close failed";
-            ok = false;
-        }
+        if (!lo.close(err)) ok = false;
     } else if (prog.cancelled()) {
         err = "Cancelled";
         ok = false;
     }
-    archive_write_free(a);
+    archive_write_free(lo.a);
+    lo.a = nullptr;
+    lo.comp.reset();
     if (!ok) {
         discardTemp(tmp);
         return false;
@@ -438,7 +557,7 @@ bool gatherInputs(const std::vector<std::string>& inputs, std::vector<InputItem>
     return true;
 }
 
-bool createArchive(const std::vector<std::string>& inputs, const std::string& outPath, const CompressOptions& opt,
+static bool createWhole(const std::vector<std::string>& inputs, const std::string& outPath, const CompressOptions& opt,
                    Progress& prog, CompressResult& res, std::string& err) {
     res = CompressResult();
     if (inputs.empty()) {
@@ -463,9 +582,10 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
                   Progress& prog, CompressResult& res, std::string& err) {
     res = CompressResult();
     kmp::Options ko;
-    ko.mode = (kmp::Mode)std::clamp(opt.level < 0 ? 2 : opt.level, 0, 3);
+    ko.mode = (kmp::Mode)std::clamp(opt.level < 0 ? 2 : opt.level, 0, 5);
     ko.threads = opt.threads;
     ko.dedup = opt.dedup;
+    ko.sizeHint = sourceSize(src) * 2;  // a rough guess at the unpacked size
     std::string tmp = tmpPathFor(outPath);
     kmp::Writer w;
     w.setProgress(&prog);
@@ -478,6 +598,7 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
             w.abort();
             return false;
         }
+        r.setSequential();
         uint64_t total = 0;
         for (auto& e : r.entries()) total += e.size;
         prog.total = total;
@@ -509,22 +630,14 @@ bool convertToKmp(const Source& src, const std::string& outPath, const CompressO
         archive_read_support_format_all(a);
         archive_read_set_options(a, "cpio:hdrcharset=UTF-8,tar:hdrcharset=UTF-8");  // see kz_archive
         if (!password.empty()) archive_read_add_passphrase(a, password.c_str());
-        int rc;
-        if (src.inMemory())
-            rc = archive_read_open_memory(a, src.mem->data(), src.mem->size());
-        else
-#ifdef _WIN32
-            rc = archive_read_open_filename_w(a, u8path(src.path).wstring().c_str(), 1 << 20);
-#else
-            rc = archive_read_open_filename(a, src.path.c_str(), 1 << 20);
-#endif
+        int rc = openReadSource(a, src);
         if (rc != ARCHIVE_OK) {
             err = archive_error_string(a) ? archive_error_string(a) : "cannot open source archive";
             archive_read_free(a);
             w.abort();
             return false;
         }
-        prog.total = src.inMemory() ? src.mem->size() : fileSize(src.path);
+        prog.total = sourceSize(src);
         archive_entry* e;
         std::vector<char> buf(1 << 20);
         while ((rc = archive_read_next_header(a, &e)) == ARCHIVE_OK || rc == ARCHIVE_WARN) {
@@ -594,13 +707,49 @@ struct ConvEntry {
     std::string link;
 };
 
+class EntrySink {
+public:
+    virtual ~EntrySink() = default;
+    // Starts an entry. Returns false on a fatal error (err set); `skip` is set when the entry is dropped.
+    virtual bool begin(const ConvEntry& e, bool& skip, std::string& err) = 0;
+    virtual bool write(const void* p, size_t n, std::string& err) = 0;
+    virtual uint64_t files() const = 0;
+};
+
+class DirectSink : public EntrySink {
+public:
+    explicit DirectSink(ArchiveWriter& w) : w_(w) {}
+    bool begin(const ConvEntry& e, bool& skip, std::string& err) override {
+        skip = false;
+        bool ok = true;
+        if (e.type == 1) w_.addDir(e.path, e.mode, e.mtime);
+        else if (e.type == 2) ok = w_.addSymlink(e.path, e.link, e.mtime);
+        else {
+            ok = w_.beginFile(e.path, e.mode, e.mtime);
+            ++files_;
+        }
+        if (!ok) err = w_.error();
+        return ok;
+    }
+    bool write(const void* p, size_t n, std::string& err) override {
+        if (w_.write(p, n)) return true;
+        err = w_.error();
+        return false;
+    }
+    uint64_t files() const override { return files_; }
+
+private:
+    ArchiveWriter& w_;
+    uint64_t files_ = 0;
+};
+
 // Writes converted entries into a libarchive writer.
-class ConvWriter {
+class ConvWriter : public EntrySink {
 public:
     ConvWriter(archive* a, const FormatDesc& fd, Progress& prog) : a_(a), fd_(fd), prog_(prog) {}
 
     // Starts an entry. Returns false on a fatal error (err set); `skip` is set when the entry is dropped.
-    bool begin(const ConvEntry& e, bool& skip, std::string& err) {
+    bool begin(const ConvEntry& e, bool& skip, std::string& err) override {
         skip = false;
         if (fd_.singleFile) {
             if (e.type != 0) {
@@ -654,7 +803,7 @@ public:
         return true;
     }
 
-    bool write(const void* p, size_t n, std::string& err) {
+    bool write(const void* p, size_t n, std::string& err) override {
         if (archive_write_data(a_, p, n) < 0) {
             err = archive_error_string(a_) ? archive_error_string(a_) : "write failed";
             return false;
@@ -662,7 +811,7 @@ public:
         return true;
     }
 
-    uint64_t files() const { return files_; }
+    uint64_t files() const override { return files_; }
 
 private:
     archive* a_;
@@ -673,7 +822,7 @@ private:
 
 }  // namespace
 
-bool convertArchive(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
+static bool convertWhole(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
                     Progress& prog, CompressResult& res, std::string& err) {
     if (opt.format == OutFormat::Kmp) return convertToKmp(src, outPath, opt, password, prog, res, err);
     res = CompressResult();
@@ -690,23 +839,27 @@ bool convertArchive(const Source& src, const std::string& outPath, const Compres
         }
     }
 
-    archive* w = archive_write_new();
-    if (!configureWriter(w, opt, err)) {
-        archive_write_free(w);
-        return false;
-    }
     std::string tmp = tmpPathFor(outPath);
-#ifdef _WIN32
-    int rc = archive_write_open_filename_w(w, u8path(tmp).wstring().c_str());
-#else
-    int rc = archive_write_open_filename(w, tmp.c_str());
-#endif
-    if (rc != ARCHIVE_OK) {
-        err = archive_error_string(w) ? archive_error_string(w) : "cannot create output";
-        archive_write_free(w);
-        return false;
+    uint64_t hint = sourceSize(src) * 2;  // rough unpacked size, to size the parallel work units
+    const bool is7z = writesDirectly(opt.format);
+    std::unique_ptr<ArchiveWriter> direct;
+    LaOutput lo;
+    std::unique_ptr<EntrySink> sinkOwner;
+    if (is7z) {
+        direct = openDirectWriter(opt, tmp, hint, err);
+        if (!direct) return false;
+        direct->setProgress(&prog);
+        sinkOwner = std::make_unique<DirectSink>(*direct);
+    } else {
+        if (!lo.open(opt, tmp, hint, prog, err)) {
+            lo.comp.reset();
+            discardTemp(tmp);
+            return false;
+        }
+        sinkOwner = std::make_unique<ConvWriter>(lo.a, fd, prog);
     }
-    ConvWriter cw(w, fd, prog);
+    EntrySink& cw = *sinkOwner;
+    int rc = ARCHIVE_OK;
     bool ok = true;
     auto fail = [&](const std::string& m) {
         if (err.empty()) err = m;
@@ -718,6 +871,7 @@ bool convertArchive(const Source& src, const std::string& outPath, const Compres
         if (!r.open(src, err)) {
             ok = false;
         } else {
+            r.setSequential();
             uint64_t total = 0;
             for (auto& e : r.entries()) total += e.size;
             prog.total = total;
@@ -757,18 +911,11 @@ bool convertArchive(const Source& src, const std::string& outPath, const Compres
         archive_read_support_format_all(a);
         archive_read_set_options(a, "cpio:hdrcharset=UTF-8,tar:hdrcharset=UTF-8");
         if (!password.empty()) archive_read_add_passphrase(a, password.c_str());
-        if (src.inMemory())
-            rc = archive_read_open_memory(a, src.mem->data(), src.mem->size());
-        else
-#ifdef _WIN32
-            rc = archive_read_open_filename_w(a, u8path(src.path).wstring().c_str(), 1 << 20);
-#else
-            rc = archive_read_open_filename(a, src.path.c_str(), 1 << 20);
-#endif
+        rc = openReadSource(a, src);
         if (rc != ARCHIVE_OK) {
             fail(archive_error_string(a) ? archive_error_string(a) : "cannot open source archive");
         } else {
-            prog.total = src.inMemory() ? src.mem->size() : fileSize(src.path);
+            prog.total = sourceSize(src);
             prog.done = 0;
             archive_entry* e;
             std::vector<char> buf(kIoBuf);
@@ -867,11 +1014,18 @@ bool convertArchive(const Source& src, const std::string& outPath, const Compres
 
     if (ok && fd.singleFile && cw.files() == 0) fail(std::string(fd.name) + " needs a file to compress, but the archive has none");
     if (ok) {
-        if (opt.format == OutFormat::SevenZip || opt.format == OutFormat::Iso)
-            prog.setStatus("Finalizing (compressing solid stream)...");
-        if (archive_write_close(w) != ARCHIVE_OK) fail(archive_error_string(w) ? archive_error_string(w) : "close failed");
+        prog.setStatus("Finishing...");
+        std::string cerr;
+        if (is7z ? !direct->finish(cerr) : !lo.close(cerr)) fail(cerr.empty() ? "close failed" : cerr);
+    } else if (is7z) {
+        direct->abort();
     }
-    archive_write_free(w);
+    sinkOwner.reset();
+    if (lo.a) {
+        archive_write_free(lo.a);
+        lo.a = nullptr;
+    }
+    lo.comp.reset();
     if (!ok) {
         discardTemp(tmp);
         return false;
@@ -881,6 +1035,31 @@ bool convertArchive(const Source& src, const std::string& outPath, const Compres
     res.outputBytes = fileSize(outPath);
     res.summary = ratioText(res.inputBytes, res.outputBytes);
     return true;
+}
+
+// Splits a finished archive into volumes when asked to, and records which files were written.
+static bool finishOutput(const std::string& outPath, const CompressOptions& opt, Progress& prog, CompressResult& res,
+                         std::string& err) {
+    res.parts.clear();
+    if (!opt.volumeSize) {
+        res.parts.push_back(outPath);
+        return true;
+    }
+    prog.setStatus("Splitting into parts");
+    if (!splitIntoVolumes(outPath, opt.volumeSize, res.parts, err)) return false;
+    if (res.parts.size() > 1)
+        res.summary += ", split into " + std::to_string(res.parts.size()) + " parts of " + humanSize(opt.volumeSize);
+    return true;
+}
+
+bool createArchive(const std::vector<std::string>& inputs, const std::string& outPath, const CompressOptions& opt,
+                   Progress& prog, CompressResult& res, std::string& err) {
+    return createWhole(inputs, outPath, opt, prog, res, err) && finishOutput(outPath, opt, prog, res, err);
+}
+
+bool convertArchive(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
+                    Progress& prog, CompressResult& res, std::string& err) {
+    return convertWhole(src, outPath, opt, password, prog, res, err) && finishOutput(outPath, opt, prog, res, err);
 }
 
 }  // namespace kz

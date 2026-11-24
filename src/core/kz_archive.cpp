@@ -17,41 +17,7 @@ namespace kz {
 
 namespace {
 
-// ---------------------------------------------------------------- multi-volume detection
-// "name.part1.rar" -> all existing partN.rar; "name.7z.001" -> .001, .002, ...
-std::vector<std::string> volumeSet(const std::string& path) {
-    std::vector<std::string> vols;
-    std::string name = fileNameOf(path);
-    std::string dir = path.substr(0, path.size() - name.size());
-    std::smatch m;
-    static const std::regex partRar(R"(^(.*)\.part(\d+)\.rar$)", std::regex::icase);
-    static const std::regex numbered(R"(^(.*)\.(\d{3})$)");
-    auto exists = [](const std::string& p) {
-        std::error_code ec;
-        return fs::is_regular_file(u8path(p), ec);
-    };
-    if (std::regex_match(name, m, partRar)) {
-        std::string stem = m[1].str();
-        size_t width = m[2].str().size();
-        for (int i = 1; i < 10000; ++i) {
-            std::string num = std::to_string(i);
-            if (num.size() < width) num = std::string(width - num.size(), '0') + num;
-            std::string p = dir + stem + ".part" + num + ".rar";
-            if (!exists(p)) break;
-            vols.push_back(p);
-        }
-    } else if (std::regex_match(name, m, numbered) && m[2].str() == "001") {
-        for (int i = 1; i < 1000; ++i) {
-            char num[8];
-            std::snprintf(num, sizeof num, "%03d", i);
-            std::string p = dir + m[1].str() + "." + num;
-            if (!exists(p)) break;
-            vols.push_back(p);
-        }
-    }
-    if (vols.size() < 2) vols.clear();
-    return vols;
-}
+}  // namespace
 
 uint64_t sourceSize(const Source& src) {
     if (src.inMemory()) return src.mem->size();
@@ -65,6 +31,33 @@ uint64_t sourceSize(const Source& src) {
     }
     return total;
 }
+
+int openReadSource(archive* r, const Source& src) {
+    if (src.inMemory()) return archive_read_open_memory(r, src.mem->data(), src.mem->size());
+    auto vols = volumeSet(src.path);
+    if (!vols.empty()) {
+#ifdef _WIN32
+        std::vector<std::wstring> w;
+        for (auto& v : vols) w.push_back(u8path(v).wstring());
+        std::vector<const wchar_t*> pw;
+        for (auto& v : w) pw.push_back(v.c_str());
+        pw.push_back(nullptr);
+        return archive_read_open_filenames_w(r, pw.data(), 1 << 20);
+#else
+        std::vector<const char*> pv;
+        for (auto& v : vols) pv.push_back(v.c_str());
+        pv.push_back(nullptr);
+        return archive_read_open_filenames(r, pv.data(), 1 << 20);
+#endif
+    }
+#ifdef _WIN32
+    return archive_read_open_filename_w(r, u8path(src.path).wstring().c_str(), 1 << 20);
+#else
+    return archive_read_open_filename(r, src.path.c_str(), 1 << 20);
+#endif
+}
+
+namespace {
 
 const char* laError(archive* a) {
     const char* e = archive_error_string(a);
@@ -104,33 +97,7 @@ struct LaReader {
                 archive_read_set_options(r, "cpio:hdrcharset=UTF-8,tar:hdrcharset=UTF-8");
             }
             if (!password.empty()) archive_read_add_passphrase(r, password.c_str());
-            int rc;
-            if (src.inMemory()) {
-                rc = archive_read_open_memory(r, src.mem->data(), src.mem->size());
-            } else {
-                auto vols = volumeSet(src.path);
-                if (!vols.empty()) {
-#ifdef _WIN32
-                    std::vector<std::wstring> w;
-                    for (auto& v : vols) w.push_back(u8path(v).wstring());
-                    std::vector<const wchar_t*> pw;
-                    for (auto& v : w) pw.push_back(v.c_str());
-                    pw.push_back(nullptr);
-                    rc = archive_read_open_filenames_w(r, pw.data(), 1 << 20);
-#else
-                    std::vector<const char*> pv;
-                    for (auto& v : vols) pv.push_back(v.c_str());
-                    pv.push_back(nullptr);
-                    rc = archive_read_open_filenames(r, pv.data(), 1 << 20);
-#endif
-                } else {
-#ifdef _WIN32
-                    rc = archive_read_open_filename_w(r, u8path(src.path).wstring().c_str(), 1 << 20);
-#else
-                    rc = archive_read_open_filename(r, src.path.c_str(), 1 << 20);
-#endif
-                }
-            }
+            int rc = openReadSource(r, src);
             if (rc == ARCHIVE_OK && tryRaw && archive_filter_count(r) <= 1) {
                 // Raw mode accepts anything; only keep it if a decompression filter matched.
                 rc = ARCHIVE_FATAL;
@@ -228,6 +195,7 @@ bool kmpList(const Source& src, ArchiveInfo& out, std::string& err) {
 bool kmpExtract(const Source& src, const ExtractOptions& opt, Progress& prog, std::string& err) {
     kmp::Reader r;
     if (!r.open(src, err)) return false;
+    if (opt.only.empty()) r.setSequential(&prog);  // whole archive: decode blocks ahead on every core
     fs::path dest = canonicalDest(opt.destDir);
     const auto& ents = r.entries();
 
@@ -344,6 +312,7 @@ bool kmpRead(const Source& src, const std::string& path, uint64_t maxBytes, std:
 bool kmpTest(const Source& src, Progress& prog, std::string& err) {
     kmp::Reader r;
     if (!r.open(src, err)) return false;
+    r.setSequential(&prog);
     uint64_t total = 0;
     for (auto& e : r.entries()) total += e.size;
     prog.total = total;

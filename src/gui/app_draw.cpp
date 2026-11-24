@@ -292,7 +292,31 @@ void App::frame() {
         toast(col::Error, e);
     }
     drawToasts();
-    if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
+}
+
+void App::drawSplitOption(bool* on, int* preset, int* customMb, float inner) {
+    (void)inner;
+    ImGui::PushID(on);
+    toggle("Split into parts", on);
+    ImGui::SetItemTooltip("Cut the finished archive into .001, .002 ... files of a set size\n"
+                          "(for uploads, e-mail or FAT32 drives). Open the .001 to read them back.");
+    if (*on) {
+        const float em = ImGui::GetFontSize();
+        static const char* sizes[] = {"100 MB", "700 MB", "4 GB (FAT32)", "Custom"};
+        ImGui::Indent(em * 1.6f);
+        segmented("##split", preset, sizes, 4);
+        if (*preset == 3) {
+            ImGui::SameLine(0, em * 0.6f);
+            ImGui::SetNextItemWidth(em * 6.0f);
+            ImGui::InputInt("##mb", customMb, 0, 0);
+            if (*customMb < 1) *customMb = 1;
+            ImGui::SameLine(0, em * 0.4f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(col::Dim, "MB per part");
+        }
+        ImGui::Unindent(em * 1.6f);
+    }
+    ImGui::PopID();
 }
 
 void App::drawMenuBar() {
@@ -361,7 +385,6 @@ void App::drawMenuBar() {
     ImGui::PopStyleColor();
     if (viewOpen) {
         ImGui::MenuItem("Activity Panel", nullptr, &showActivity_);
-        ImGui::MenuItem("ImGui Demo", nullptr, &showDemo_);
         ImGui::EndMenu();
     }
     ImGui::PushStyleColor(ImGuiCol_Text, mix(col::Dim, col::Text, 0.4f));
@@ -416,7 +439,6 @@ void App::drawMenuBar() {
                 dl->AddLine(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f), ImVec2(c.x + g * 0.5f, c.y + g * 0.5f), gc, th);
                 dl->AddLine(ImVec2(c.x + g * 0.5f, c.y - g * 0.5f), ImVec2(c.x - g * 0.5f, c.y + g * 0.5f), gc, th);
             }
-            if (hov) ImGui::SetTooltip("%s", i == 0 ? "Minimize" : i == 1 ? (frame::maximized() ? "Restore" : "Maximize") : "Close");
             if (clicked) {
                 if (i == 0) frame::minimize();
                 else if (i == 1) frame::toggleMaximize();
@@ -1576,11 +1598,14 @@ void App::drawCompressWindow() {
             {"Balanced", "Zstd-19 with long-range matching. Quick to extract.", nullptr},
             {"Ultra", "LZMA2 + x86/ARM64 code filters + text tuning.", "BEST"},
             {"Max", "Tries every codec on every block, keeps the smallest. Slow.", nullptr},
+            {"Extreme", "Context mixing on every core. ~15% smaller than Max; extracting is just as slow.", nullptr},
+            {"Ultimate", "Heaviest model, 256 MB blocks, GBs of RAM. Smallest possible; for archiving.", "SMALLEST"},
         };
         float cw = (inner - em * 0.6f) * 0.5f, chh = em * 3.9f;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 6; ++i) {
             if (i % 2) ImGui::SameLine(0, em * 0.6f);
-            if (optionCard(modes[i].name, modes[i].name, modes[i].desc, cmp_.kmpMode == i, ImVec2(cw, chh), modes[i].badge))
+            ImVec2 size(cw, chh);
+            if (optionCard(modes[i].name, modes[i].name, modes[i].desc, cmp_.kmpMode == i, size, modes[i].badge))
                 cmp_.kmpMode = i;
         }
         ImGui::Dummy(ImVec2(0, em * 0.1f));
@@ -1660,9 +1685,11 @@ void App::drawCompressWindow() {
         ImGui::PopFont();
         ImGui::SetItemTooltip("%s", cmp_.out);
     }
+    drawSplitOption(&cmp_.split, &cmp_.splitPreset, &cmp_.splitCustomMb, inner);
     toggle("Open the archive when finished", &cmp_.openWhenDone);
 
     // --- footer
+    dialogFooter();
     ImGui::Dummy(ImVec2(0, em * 0.4f));
     {
         ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1741,6 +1768,7 @@ void App::drawExtractWindow() {
         ImGui::PopClipRect();
         ImGui::Dummy(ImVec2(inner, h));
     }
+    dialogFooter();
     ImGui::Dummy(ImVec2(0, em * 0.4f));
     {
         ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1855,11 +1883,14 @@ void App::drawConvertWindow() {
             {"Balanced", "Zstd-19 with long-range matching.", nullptr},
             {"Ultra", "LZMA2 + code filters + text tuning.", "BEST"},
             {"Max", "Every codec on every block. Slow.", nullptr},
+            {"Extreme", "Context mixing on every core. Slow both ways.", nullptr},
+            {"Ultimate", "Heaviest model, huge blocks. Smallest; very slow.", "SMALLEST"},
         };
         float cw = (inner - em * 0.6f) * 0.5f, chh = em * 3.6f;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 6; ++i) {
             if (i % 2) ImGui::SameLine(0, em * 0.6f);
-            if (optionCard(modes[i].name, modes[i].name, modes[i].desc, conv_.mode == i, ImVec2(cw, chh), modes[i].badge)) conv_.mode = i;
+            ImVec2 size(cw, chh);
+            if (optionCard(modes[i].name, modes[i].name, modes[i].desc, conv_.mode == i, size, modes[i].badge)) conv_.mode = i;
         }
         ImGui::Dummy(ImVec2(0, em * 0.1f));
         toggle("Deduplicate repeated data (content-defined chunking)", &conv_.dedup);
@@ -1939,9 +1970,11 @@ void App::drawConvertWindow() {
         ImGui::SameLine(0, em * 0.4f);
         ImGui::TextColored(col::Error, "That is the archive being converted - pick another name");
     }
+    drawSplitOption(&conv_.split, &conv_.splitPreset, &conv_.splitCustomMb, inner);
     toggle("Open the new archive when finished", &conv_.openWhenDone);
 
     // --- footer
+    dialogFooter();
     ImGui::Dummy(ImVec2(0, em * 0.4f));
     {
         ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1967,6 +2000,7 @@ void App::drawConvertWindow() {
         o.level = isKmp ? conv_.mode : conv_.level;
         o.dedup = conv_.dedup;
         o.password = fd.password ? conv_.pw : "";
+        o.volumeSize = conv_.split ? splitBytes(conv_.splitPreset, conv_.splitCustomMb) : 0;
         runConvert(t->id, conv_.out, o, conv_.openWhenDone);
         conv_.open = false;
     }
@@ -1991,9 +2025,11 @@ void App::drawPasswordPopup() {
     if (open) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
-        dl->PushClipRectFullScreen();
-        softShadow(dl, wp, ImVec2(wp.x + ws.x, wp.y + ws.y), ImGui::GetStyle().WindowRounding, em * 1.6f, 0.55f);
-        dl->PopClipRect();
+        if (ImGui::GetWindowViewport() == ImGui::GetMainViewport()) {  // dragged out, DWM draws the shadow
+            dl->PushClipRectFullScreen();
+            softShadow(dl, wp, ImVec2(wp.x + ws.x, wp.y + ws.y), ImGui::GetStyle().WindowRounding, em * 1.6f, 0.55f);
+            dl->PopClipRect();
+        }
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + W - em * 3.0f);
         dialogHeader("Password required", pwd_.prompt.c_str(), Ico::Lock, col::Warn, W, nullptr);
         float inner = W - em * 3.0f;
@@ -2076,7 +2112,7 @@ void App::drawFormats() {
     ImGui::Dummy(ImVec2(0, em * 0.3f));
     icon(Ico::Info, em * 0.95f, col::Dim);
     ImGui::SameLine(0, em * 0.4f);
-    ImGui::TextColored(col::Dim, "RAR can be read but not written (the RAR format is proprietary).");
+    ImGui::TextColored(col::Dim, "RAR is written stored (uncompressed): RAR's compression method is proprietary.");
     endDialog();
 }
 
@@ -2130,7 +2166,7 @@ void App::drawSettings() {
             }
         }
         ImGui::PushStyleColor(ImGuiCol_Text, col::Dim);
-        ImGui::TextWrapped("Adds a Kompressor submenu to files and folders: compress, super compress, and for "
+        ImGui::TextWrapped("Adds a \"Komp\" submenu to files and folders: compress, super compress, and for "
                            "archives open and extract. On Windows 11 it sits under \"Show more options\".");
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, em * 0.6f));

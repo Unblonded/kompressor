@@ -1,5 +1,6 @@
 // Kompressor GUI entry point: GLFW window + OpenGL 3 + Dear ImGui.
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
@@ -339,11 +340,26 @@ int main(int argc, char** argv) {
             if (g_render) g_render();
         });
 
+        // ImGui needs a few frames to settle after input: a menu or popup that just opened stays hidden for
+        // one frame while it is measured. Waiting for the next event there leaves a visible blank (the
+        // "flash" when moving between File / Archive / View), so draw on until things are still.
+        auto unsettled = [] {
+            ImGuiContext& g = *ImGui::GetCurrentContext();
+            if (g.InputEventsTrail.Size > 0) return true;
+            for (ImGuiWindow* win : g.Windows)
+                if (win->Active && (win->HiddenFramesCannotSkipItems > 0 || win->HiddenFramesCanSkipItems > 0 || win->Appearing))
+                    return true;
+            return false;
+        };
+        int settleFrames = 0;
         while (!glfwWindowShouldClose(window)) {
             // Sleep while idle; tick quickly only while work is running or animating.
-            if (app.busy()) glfwWaitEventsTimeout(1.0 / 30.0);
+            if (settleFrames > 0) glfwPollEvents();
+            else if (app.busy()) glfwWaitEventsTimeout(1.0 / 30.0);
             else glfwWaitEventsTimeout(0.5);
             renderFrame();
+            if (unsettled()) settleFrames = 3;
+            else if (settleFrames > 0) --settleFrames;
         }
         glfwSetWindowRefreshCallback(window, nullptr);
         g_render = nullptr;

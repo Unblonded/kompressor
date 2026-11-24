@@ -9,6 +9,7 @@ namespace kz {
 enum class OutFormat {
     Zip,
     SevenZip,
+    Rar,
     Tar,
     TarGz,
     TarBz2,

@@ -18,6 +18,7 @@ namespace {
 const wchar_t* kClasses = L"Software\\Classes\\";
 const wchar_t* kPrefsKey = L"Software\\Kompressor";
 const wchar_t* kVerb = L"Kompressor";
+const wchar_t* kMenuName = L"Komp";  // what the cascade is called in the menu
 const wchar_t* kFilesMenu = L"Kompressor.Menu.Files";
 const wchar_t* kArchiveMenu = L"Kompressor.Menu.Archive";
 
@@ -62,7 +63,6 @@ bool addItem(const std::wstring& menu, const wchar_t* id, const wchar_t* label, 
              const std::wstring& exe, bool separatorBefore = false) {
     std::wstring k = kClasses + menu + L"\\shell\\" + id;
     bool ok = setStr(HKEY_CURRENT_USER, k, L"MUIVerb", label) &&
-              setStr(HKEY_CURRENT_USER, k, L"Icon", L"\"" + exe + L"\",0") &&
               // "Player" lifts Explorer's 15-item limit; the per-item launches are batched by collectShellLaunch.
               setStr(HKEY_CURRENT_USER, k, L"MultiSelectModel", L"Player") &&
               setStr(HKEY_CURRENT_USER, k + L"\\command", nullptr, command(exe, action));
@@ -80,10 +80,10 @@ bool addItem(const std::wstring& menu, const wchar_t* id, const wchar_t* label, 
 // The "Kompressor >" entry on a class, pointing at one of the shared sub-menus.
 bool addCascade(const std::wstring& cls, const std::wstring& menu, const std::wstring& exe, const std::wstring& appliesTo = {}) {
     std::wstring k = kClasses + cls + L"\\shell\\" + kVerb;
-    bool ok = setStr(HKEY_CURRENT_USER, k, L"MUIVerb", L"Kompressor") &&
-              setStr(HKEY_CURRENT_USER, k, L"Icon", L"\"" + exe + L"\",0") &&
+    bool ok = setStr(HKEY_CURRENT_USER, k, L"MUIVerb", kMenuName) &&
               setStr(HKEY_CURRENT_USER, k, L"ExtendedSubCommandsKey", menu) &&
-              setStr(HKEY_CURRENT_USER, k, L"MultiSelectModel", L"Player");
+              setStr(HKEY_CURRENT_USER, k, L"MultiSelectModel", L"Player") &&
+              setStr(HKEY_CURRENT_USER, k, L"Position", L"Bottom");
     if (ok && !appliesTo.empty()) ok = setStr(HKEY_CURRENT_USER, k, L"AppliesTo", appliesTo);
     return ok;
 }
@@ -105,7 +105,11 @@ bool supported() { return true; }
 
 bool registered() {
     std::wstring cmd = getStr(HKEY_CURRENT_USER, std::wstring(kClasses) + kFilesMenu + L"\\shell\\1compress\\command", nullptr);
-    return !cmd.empty() && cmd == command(exePath(), L"compress");
+    // Also require the current layout (name, no icon), so menus from older versions get replaced.
+    std::wstring cascade = std::wstring(kClasses) + L"*\\shell\\" + kVerb;
+    return !cmd.empty() && cmd == command(exePath(), L"compress") &&
+           getStr(HKEY_CURRENT_USER, cascade, L"MUIVerb") == kMenuName && getStr(HKEY_CURRENT_USER, cascade, L"Icon").empty() &&
+           getStr(HKEY_CURRENT_USER, cascade, L"Position") == L"Bottom";
 }
 
 bool registerMenu(std::string& err) {
@@ -114,21 +118,21 @@ bool registerMenu(std::string& err) {
     std::wstring exe = exePath();
     // Plain files and folders get the compress entries; archives (a second verb, since one class cannot
     // hold two cascades with the same name) get open / extract on top.
-    bool ok = addItem(kFilesMenu, L"1compress", L"Add to archive...", L"compress", exe) &&
-         addItem(kFilesMenu, L"2super", L"Super compress to .kmp...", L"super", exe) &&
-         addItem(kArchiveMenu, L"1open", L"Open with Kompressor", L"open", exe) &&
+    bool ok = addItem(kFilesMenu, L"1compress", L"Compress...", L"compress", exe) &&
+         addItem(kFilesMenu, L"2super", L"Super compress...", L"super", exe) &&
+         addItem(kArchiveMenu, L"1open", L"Open", L"open", exe) &&
          addItem(kArchiveMenu, L"2here", L"Extract here", L"extract-here", exe) &&
          addItem(kArchiveMenu, L"3to", L"Extract to folder", L"extract-to", exe) &&
-         addItem(kArchiveMenu, L"4compress", L"Add to archive...", L"compress", exe, true) &&
-         addItem(kArchiveMenu, L"5super", L"Super compress to .kmp...", L"super", exe) &&
+         addItem(kArchiveMenu, L"4compress", L"Compress...", L"compress", exe, true) &&
+         addItem(kArchiveMenu, L"5super", L"Super compress...", L"super", exe) &&
          addCascade(L"*", kFilesMenu, exe, archiveQuery(true));
     if (ok) {
         std::wstring k = std::wstring(kClasses) + L"*\\shell\\KompressorArchive";
-        ok = setStr(HKEY_CURRENT_USER, k, L"MUIVerb", L"Kompressor") &&
-             setStr(HKEY_CURRENT_USER, k, L"Icon", L"\"" + exe + L"\",0") &&
+        ok = setStr(HKEY_CURRENT_USER, k, L"MUIVerb", kMenuName) &&
              setStr(HKEY_CURRENT_USER, k, L"ExtendedSubCommandsKey", kArchiveMenu) &&
              setStr(HKEY_CURRENT_USER, k, L"MultiSelectModel", L"Player") &&
-             setStr(HKEY_CURRENT_USER, k, L"AppliesTo", archiveQuery(false));
+             setStr(HKEY_CURRENT_USER, k, L"AppliesTo", archiveQuery(false)) &&
+             setStr(HKEY_CURRENT_USER, k, L"Position", L"Bottom");
     }
     ok = ok && addCascade(L"Directory", kFilesMenu, exe);
     if (!ok) {

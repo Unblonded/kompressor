@@ -17,10 +17,12 @@ A cross-platform (Windows · macOS · Linux) file compressor written in C++17 wi
 | Content-aware streams | Text, x86 code, ARM64 code, already-compressed media and generic binary data go into separate solid blocks, so similar data shares one dictionary. |
 | Per-stream codecs | LZMA2 with BCJ x86/ARM64 branch filters for executables, text-tuned LZMA2 (lc=4, pb=0), and media is stored or fast-zstd'd instead of wasting CPU. |
 | Max mode | Each block is compressed with every candidate codec, and the smallest result is kept. |
+| Extreme mode | KCM, a built-in context-mixing coder: order-0 to order-8, word, column, sparse, record, indirect and two match models feed five neural mixers and four SSE stages, per bit. Roughly 15% smaller than Max, at a few hundred KB/s per core in both directions. |
+| Ultimate mode | A heavier KCM (bit-history states, extra contexts, eight mixers, six SSE stages, up to 1 GiB of tables) over blocks of up to 256 MiB, so the model keeps learning across whole data sets. For archiving: slow, several GiB of RAM. |
 | Parallel blocks | Blocks are compressed on multiple threads, with the thread count capped by available memory. |
 | Index at the end + per-block checksums | Listing is instant, one file can be read without decompressing the rest, and corruption is detected. |
 
-Modes: **Fast** (zstd‑3), **Balanced** (zstd‑19 long‑range), **Ultra** (LZMA2, the default) and **Max**.
+Modes: **Fast** (zstd‑3), **Balanced** (zstd‑19 long‑range), **Ultra** (LZMA2, the default), **Max**, **Extreme** and **Ultimate** (context mixing).
 
 Benchmark on Apple Silicon with two Python installs (141 MB, 7,569 files):
 
@@ -98,10 +100,14 @@ kompressor-cli extract <archive> [-o dir] [-p password] [entry...]
 kompressor-cli test    <archive>
 kompressor-cli cat     <archive> <entry>            # one member to stdout
 kompressor-cli create  out.7z|.zip|.tar.xz|... <files/folders> [-l level] [-p pw]
-kompressor-cli super   out.kmp <files/folders> [-m fast|balanced|ultra|max] [--no-dedup]
+kompressor-cli super   out.kmp <files/folders> [-m fast|balanced|ultra|max|extreme|ultimate] [--no-dedup]
 kompressor-cli convert <any-archive> out.7z|.zip|.tar.zst|.kmp|... [-l level] [-m mode] [-p pw] [-e new-pw]
                                                      # re-pack into another format without temp files
 kompressor-cli formats
+
+# create, super and convert take -v <size> to split the output into .001, .002 ... parts
+kompressor-cli create backup.7z ~/Photos -v 4g
+# split sets (.001, .partN.rar, .r00) open from any part
 ```
 
 ## Layout
@@ -114,6 +120,6 @@ src/gui/    main (GLFW/GL/fonts/HiDPI), app (explorer, preview, dialogs, jobs), 
 
 ## Notes & limits
 
-* RAR files can be read but not created, because the RAR format is proprietary. 7-Zip archives with *encrypted headers* are not supported by libarchive. Encrypted ZIPs work both ways.
+* RAR files are created as genuine RAR5 archives with stored (uncompressed) data, written from RARLAB's published format description; RAR's compression algorithm is proprietary, so it is not used. 7-Zip archives with *encrypted headers* are not supported by libarchive. Encrypted ZIPs work both ways.
 * Extraction is hardened against path traversal: `..` entries, absolute paths and paths that resolve through symlinks are refused.
 * Debug aid: `Kompressor --snapshot out.ppm [--select entry/path] archive` renders the UI, saves a frame and exits.

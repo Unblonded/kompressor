@@ -9,9 +9,10 @@ namespace kz {
 
 const std::vector<FormatDesc>& outputFormats() {
     static const std::vector<FormatDesc> f = {
-        {OutFormat::Kmp, "KMP (Super)", ".kmp", "Kompressor super compression: dedup + content-aware LZMA2/Zstd", 0, 3, 2, false, false},
+        {OutFormat::Kmp, "KMP (Super)", ".kmp", "Kompressor super compression: dedup + content-aware LZMA2/Zstd", 0, 5, 2, false, false},
         {OutFormat::SevenZip, "7Z", ".7z", "7-Zip archive, LZMA2", 0, 9, 9, false, false},
         {OutFormat::Zip, "ZIP", ".zip", "Universal ZIP (Deflate), optional AES-256", 0, 9, 6, true, false},
+        {OutFormat::Rar, "RAR", ".rar", "RAR5 archive, stored (RAR compression is proprietary)", 0, 0, 0, false, false},
         {OutFormat::TarXz, "TAR.XZ", ".tar.xz", "Tarball compressed with XZ/LZMA2", 0, 9, 9, false, false},
         {OutFormat::TarZst, "TAR.ZST", ".tar.zst", "Tarball compressed with Zstandard", 1, 22, 19, false, false},
         {OutFormat::TarGz, "TAR.GZ", ".tar.gz", "Tarball compressed with gzip", 1, 9, 9, false, false},
@@ -102,6 +103,7 @@ bool looksLikeArchive(const std::string& name) {
                                  "tbz2", "xz", "txz", "lzma", "zst", "tzst", "lz4", "lz", "lzo", "z", "uu", "iso", "cab",
                                  "lha", "lzh", "xar", "pkg", "cpio", "rpm", "ar", "deb", "a", "warc", "mtree", "shar",
                                  "crx", "vsix", "appx", "msix", "cbz", "cbr", "cb7", "001"};
+    if (looksLikeVolume(name)) return true;
     std::string e = lowerExt(name);
     if (e.empty()) return false;
     for (const char* x : exts)

@@ -10,10 +10,13 @@
 #include <deque>
 #include <fstream>
 #include <future>
+#include <mutex>
 #include <stdexcept>
 #include <unordered_map>
 
 #define XXH_INLINE_ALL
+#include "kz_cm.hpp"
+#include "kz_pool.hpp"
 #include "xxhash.h"
 
 namespace kz::kmp {
@@ -27,14 +30,14 @@ constexpr size_t kHeaderSize = 16;
 constexpr size_t kFooterSize = 40;
 constexpr uint64_t MiB = 1024ull * 1024ull;
 
-enum Codec : uint8_t { CodecStore = 0, CodecZstd = 1, CodecLzma2 = 2 };
+enum Codec : uint8_t { CodecStore = 0, CodecZstd = 1, CodecLzma2 = 2, CodecCm = 3 };
 enum Filter : uint8_t { FilterNone = 0, FilterX86 = 1, FilterArm64 = 2 };
 enum Category : uint8_t { CatGeneric = 0, CatText, CatX86, CatArm64, CatMedia, CatCount };
 
 struct BlockRec {
     uint64_t offset = 0, packed = 0, raw = 0;
     uint8_t codec = 0, filter = 0;
-    uint32_t param = 0;  // LZMA2 dictionary size
+    uint32_t param = 0;  // LZMA2 dictionary size; KCM profile | level << 8
     uint64_t hash = 0;   // XXH3-64 of the raw block
 };
 
@@ -294,7 +297,8 @@ bool lzmaCompress(const uint8_t* in, size_t n, uint8_t filter, bool text, uint32
     return true;
 }
 
-bool decompressBlock(const BlockRec& b, const uint8_t* in, std::vector<uint8_t>& out, std::string& err) {
+bool decompressBlock(const BlockRec& b, const uint8_t* in, std::vector<uint8_t>& out, std::string& err,
+                     const cm::Tick& tick = {}) {
     out.resize((size_t)b.raw);
     switch (b.codec) {
         case CodecStore:
@@ -334,8 +338,15 @@ bool decompressBlock(const BlockRec& b, const uint8_t* in, std::vector<uint8_t>&
             }
             return true;
         }
+        case CodecCm:
+            if (!cm::decompress(in, (size_t)b.packed, out.data(), (size_t)b.raw, (cm::Profile)(b.param & 255),
+                                (int)(b.param >> 8), tick)) {
+                err = "kcm: corrupt block";
+                return false;
+            }
+            return true;
         default:
-            err = "unknown codec " + std::to_string(b.codec);
+            err = "unknown codec " + std::to_string(b.codec) + " (made by a newer Kompressor?)";
             return false;
     }
 }
@@ -352,13 +363,24 @@ struct DoneBlock {
     std::vector<uint8_t> data;
 };
 
-DoneBlock compressJob(PendingBlock pb, Mode mode) {
+DoneBlock compressJob(PendingBlock pb, Mode mode, Progress* prog) {
     DoneBlock d;
     d.id = pb.id;
     const uint8_t* in = pb.raw.data();
     size_t n = pb.raw.size();
     d.rec.raw = n;
     d.rec.hash = XXH3_64bits(in, n);
+    // These bytes were counted as read; hand them over to "done" as the work actually happens.
+    size_t reported = 0;
+    auto tick = [&](size_t k) {
+        k = std::min(k, n - reported);
+        reported += k;
+        if (prog) prog->pending -= (int64_t)k;
+    };
+    struct Settle {
+        std::function<void()> f;
+        ~Settle() { f(); }
+    } settle{[&] { tick(n); }};
 
     bool have = false;
     auto consider = [&](std::vector<uint8_t>&& data, uint8_t codec, uint8_t filter, uint32_t param) {
@@ -386,7 +408,22 @@ DoneBlock compressJob(PendingBlock pb, Mode mode) {
     if (pb.cat == CatMedia) {
         // Already-compressed data: a quick pass catches the odd compressible file, otherwise store.
         tryZstd(mode == Mode::Fast ? 1 : 3, false);
-        if (mode == Mode::Max) tryLzma(FilterNone, false);
+        if (mode == Mode::Max || mode == Mode::Extreme || mode == Mode::Ultimate) tryLzma(FilterNone, false);
+    } else if (mode == Mode::Extreme || mode == Mode::Ultimate) {
+        // Context mixing. A cheap zstd probe first: data it cannot shrink at all (random, encrypted,
+        // unrecognised compressed formats) is not worth minutes of modelling.
+        std::vector<uint8_t> probe;
+        size_t sample = std::min<size_t>(n, 4 * MiB);
+        bool hopeless = zstdCompress(in, sample, 1, false, probe) && probe.size() > sample - sample / 64;
+        if (hopeless) {
+            tryZstd(3, false);
+        } else {
+            cm::Profile prof = text ? cm::Text : (pb.cat == CatX86 ? cm::X86 : cm::Generic);
+            std::vector<uint8_t> o;
+            int level = mode == Mode::Ultimate ? 1 : 0;
+            if (cm::compress(in, n, prof, o, level, tick)) consider(std::move(o), CodecCm, FilterNone, (uint32_t)prof | ((uint32_t)level << 8));
+            if (!have) tryLzma(exeFilter, text);
+        }
     } else {
         switch (mode) {
             case Mode::Fast: tryZstd(3, false); break;
@@ -427,6 +464,8 @@ const char* modeName(Mode m) {
         case Mode::Balanced: return "Balanced";
         case Mode::Ultra: return "Ultra";
         case Mode::Max: return "Max";
+        case Mode::Extreme: return "Extreme";
+        case Mode::Ultimate: return "Ultimate";
     }
     return "?";
 }
@@ -451,6 +490,8 @@ struct Writer::Impl {
     std::string err;
     size_t blockSize = 64 * MiB;
     unsigned threads = 1;
+    size_t maxQueued = 2;  // blocks compressing or waiting to be written
+    std::unique_ptr<ThreadPool> pool;
 
     std::vector<BlockRec> blocks;
     std::vector<ChunkRec> chunks;
@@ -513,6 +554,7 @@ struct Writer::Impl {
         if (opt.dedup) seen.emplace(key, id);
         cur.chunks.push_back(id);
         st.uniqueBytes += n;
+        if (prog) prog->pending += (int64_t)n;
         if (blk->raw.size() >= blockSize) flushBlock(curCat);
     }
 
@@ -520,8 +562,12 @@ struct Writer::Impl {
         if (!open[cat] || open[cat]->raw.empty()) return;
         PendingBlock pb = std::move(*open[cat]);
         open[cat].reset();
-        inflight.push_back(std::async(std::launch::async, compressJob, std::move(pb), opt.mode));
-        while (inflight.size() >= threads) drainOne();
+        Mode m = opt.mode;
+        Progress* pr = prog;
+        inflight.push_back(pool->submit([pb = std::move(pb), m, pr]() mutable { return compressJob(std::move(pb), m, pr); }));
+        // Write out whatever is already finished, and keep the queue (and its memory) bounded.
+        while (!inflight.empty() && inflight.front().wait_for(std::chrono::seconds(0)) == std::future_status::ready) drainOne();
+        while (inflight.size() >= maxQueued) drainOne();
     }
 
     void drainOne() {
@@ -558,27 +604,41 @@ const std::string& Writer::error() const { return d->err; }
 bool Writer::open(const fs::path& outPath, const Options& opt, std::string& err) {
     d->opt = opt;
     d->outPath = outPath;
-    size_t mb = opt.blockSizeMB;
+    size_t mb = opt.blockSizeMB, minMb = 4;
     if (!mb) {
         switch (opt.mode) {
-            case Mode::Fast: mb = 16; break;
-            case Mode::Balanced: mb = 64; break;
-            case Mode::Ultra: mb = 64; break;
-            case Mode::Max: mb = 128; break;
+            case Mode::Fast: mb = 16; minMb = 4; break;
+            case Mode::Balanced: mb = 64; minMb = 8; break;
+            case Mode::Ultra: mb = 64; minMb = 16; break;
+            case Mode::Max: mb = 128; minMb = 32; break;
+            case Mode::Extreme: mb = 64; minMb = 2; break;  // context mixing parallelises by block only
+            case Mode::Ultimate: mb = 256; minMb = 256; break;  // long history beats parallelism here
+        }
+        // Not enough data to give every core a full-size block: use smaller blocks (a small ratio
+        // cost) so all of them work instead of a few.
+        if (opt.sizeHint) {
+            uint64_t perCore = (opt.sizeHint + hardwareThreads() - 1) / hardwareThreads();
+            size_t want = (size_t)((perCore + MiB - 1) / MiB);
+            mb = std::clamp<size_t>(want, minMb, mb);
         }
     }
     mb = std::clamp<size_t>(mb, 1, 1024);
     d->blockSize = mb * MiB;
 
-    // Memory-aware parallelism: LZMA2 BT4 needs ~11x its dictionary while encoding.
+    // Memory per worker: LZMA2 (BT4 match finder) needs ~11x its dictionary while encoding, plus the
+    // block itself and its output. The dictionary is the block size rounded up to a power of two.
+    uint64_t dict = 1;
+    while (dict < d->blockSize) dict <<= 1;
     uint64_t perThread = d->blockSize * 3;
-    if (opt.mode == Mode::Ultra) perThread = d->blockSize * 12;
-    if (opt.mode == Mode::Max) perThread = d->blockSize * 14;
     if (opt.mode == Mode::Balanced) perThread = d->blockSize * 6;
-    const uint64_t budget = 4096ull * MiB;
-    unsigned auto_t = (unsigned)std::max<uint64_t>(1, budget / perThread);
-    unsigned t = opt.threads > 0 ? (unsigned)opt.threads : std::min(hardwareThreads(), auto_t);
-    d->threads = std::max(1u, t);
+    if (opt.mode == Mode::Ultra) perThread = dict * 12 + d->blockSize * 2;
+    if (opt.mode == Mode::Max) perThread = dict * 14 + d->blockSize * 3;
+    if (opt.mode == Mode::Extreme) perThread = cm::memoryFor(d->blockSize) + d->blockSize * 3;
+    if (opt.mode == Mode::Ultimate) perThread = cm::memoryFor(d->blockSize, 1) + d->blockSize * 3;
+    d->threads = threadsFor(perThread, opt.threads);
+    d->pool = std::make_unique<ThreadPool>(d->threads);
+    // A few extra finished blocks may wait for an earlier one to be written; workers never idle.
+    d->maxQueued = d->threads + std::max(2u, d->threads / 2);
 
     d->out.open(outPath, std::ios::binary | std::ios::trunc);
     if (!d->out) {
@@ -740,7 +800,14 @@ void Writer::abort() {
 // ============================================================================ Reader
 struct Reader::Impl {
     Source src;
-    std::ifstream f;
+    // The archive may be split into volumes (x.kmp.001, .002 ...): reads map onto the parts.
+    struct Part {
+        std::string path;
+        uint64_t offset = 0, size = 0;
+        std::ifstream f;
+    };
+    std::vector<Part> parts;
+    std::mutex io;  // parts' streams are shared by the decode workers
     uint64_t size = 0;
     Mode mode = Mode::Ultra;
     std::vector<BlockRec> blocks;
@@ -749,13 +816,25 @@ struct Reader::Impl {
     std::unordered_map<std::string, int> byPath;
     Stats st;
 
-    struct Cached {
-        uint32_t id;
+    // Decoded blocks. While reading sequentially (extract / test) the blocks after the current one
+    // are decoded ahead on a worker pool, so every core decompresses at once.
+    struct Decoded {
         std::shared_ptr<std::vector<uint8_t>> data;
-        uint64_t tick;
+        std::string err;
     };
-    std::vector<Cached> cache;
-    uint64_t tick = 0;
+    std::unordered_map<uint32_t, std::shared_future<Decoded>> cache;
+    std::vector<uint32_t> order;  // blocks in the order a front-to-back read needs them
+    std::vector<int> orderPos;    // block id -> index in `order`
+    // For each block, how far into `order` a front-to-back read has got by the time it needs the block
+    // for the last time; once the read is past that, the block can be dropped. (Blocks are shared by
+    // files that are far apart, so "behind the current block" is not enough: re-decoding a
+    // context-mixed block costs as much as making it.)
+    std::vector<int> lastNeed;
+    int frontier = -1;
+    Progress* workProg = nullptr;  // decode progress while reading front to back
+    bool sequential = false;
+    std::unique_ptr<ThreadPool> pool;
+    size_t window = 1;
 
     bool readAt(uint64_t off, void* dst, size_t n) {
         if (off + n > size) return false;
@@ -763,47 +842,116 @@ struct Reader::Impl {
             std::memcpy(dst, src.mem->data() + off, n);
             return true;
         }
-        f.clear();
-        f.seekg((std::streamoff)off);
-        f.read((char*)dst, (std::streamsize)n);
-        return (size_t)f.gcount() == n;
+        std::lock_guard<std::mutex> lk(io);
+        uint8_t* out = (uint8_t*)dst;
+        for (auto& p : parts) {
+            if (n == 0) break;
+            if (off >= p.offset + p.size) continue;
+            uint64_t within = off - p.offset;
+            size_t take = (size_t)std::min<uint64_t>(n, p.size - within);
+            if (!p.f.is_open()) p.f.open(u8path(p.path), std::ios::binary);
+            p.f.clear();
+            p.f.seekg((std::streamoff)within);
+            p.f.read((char*)out, (std::streamsize)take);
+            if ((size_t)p.f.gcount() != take) return false;
+            out += take;
+            off += take;
+            n -= take;
+        }
+        return n == 0;
+    }
+
+    Decoded decode(uint32_t id) {
+        Decoded r;
+        const BlockRec& b = blocks[id];
+        std::vector<uint8_t> packed((size_t)b.packed);
+        if (!readAt(b.offset, packed.data(), packed.size())) {
+            r.err = "archive is truncated (block " + std::to_string(id) + ")";
+            return r;
+        }
+        auto out = std::make_shared<std::vector<uint8_t>>();
+        Progress* pr = workProg;
+        cm::Tick tick;
+        if (pr) tick = [pr](size_t k) { pr->workDone += k; };
+        if (!decompressBlock(b, packed.data(), *out, r.err, tick)) return r;
+        if (pr && b.codec != CodecCm) pr->workDone += b.raw;
+        if (XXH3_64bits(out->data(), out->size()) != b.hash) {
+            r.err = "block " + std::to_string(id) + " failed its checksum (archive damaged)";
+            return r;
+        }
+        r.data = std::move(out);
+        return r;
+    }
+
+    void startDecode(uint32_t id) {
+        if (cache.count(id)) return;
+        if (pool) {
+            cache.emplace(id, pool->submit([this, id] { return decode(id); }).share());
+        } else {
+            std::promise<Decoded> p;
+            p.set_value(decode(id));
+            cache.emplace(id, p.get_future().share());
+        }
+    }
+
+    void enableSequential() {
+        if (sequential || blocks.empty()) return;
+        sequential = true;
+        uint64_t biggest = 1;
+        for (auto& b : blocks)
+            biggest = std::max<uint64_t>(biggest, (b.raw + b.packed) * 2 + (b.codec == CodecCm ? cm::memoryFor((size_t)b.raw, (int)(b.param >> 8)) : 0));
+        unsigned t = threadsFor(biggest, 0);
+        if (t > 1) {
+            pool = std::make_unique<ThreadPool>(t);
+            window = std::max<size_t>(t + t / 2, 2);
+        }
     }
 
     std::shared_ptr<std::vector<uint8_t>> block(uint32_t id, std::string& err) {
-        for (auto& c : cache)
-            if (c.id == id) {
-                c.tick = ++tick;
-                return c.data;
-            }
         if (id >= blocks.size()) {
             err = "chunk references missing block";
             return nullptr;
         }
-        const BlockRec& b = blocks[id];
-        std::vector<uint8_t> packed((size_t)b.packed);
-        if (!readAt(b.offset, packed.data(), packed.size())) {
-            err = "archive is truncated (block " + std::to_string(id) + ")";
+        startDecode(id);
+        if (sequential && pool) {
+            frontier = std::max(frontier, orderPos[id]);
+            int pos = frontier;
+            for (size_t k = 1; k <= window && pos + k < order.size(); ++k) startDecode(order[pos + k]);
+            // Forget blocks no later read needs.
+            for (auto it = cache.begin(); it != cache.end();) {
+                if (it->first != id && lastNeed[it->first] < frontier &&
+                    it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                    it = cache.erase(it);
+                else
+                    ++it;
+            }
+        } else if (cache.size() > 4) {
+            for (auto it = cache.begin(); it != cache.end();) {
+                if (it->first != id) it = cache.erase(it);
+                else ++it;
+            }
+        }
+        const Decoded& d = cache.at(id).get();
+        if (!d.data) {
+            err = d.err;
             return nullptr;
         }
-        auto out = std::make_shared<std::vector<uint8_t>>();
-        if (!decompressBlock(b, packed.data(), *out, err)) return nullptr;
-        if (XXH3_64bits(out->data(), out->size()) != b.hash) {
-            err = "block " + std::to_string(id) + " failed its checksum (archive damaged)";
-            return nullptr;
-        }
-        const size_t cap = 3;
-        if (cache.size() >= cap) {
-            auto old = std::min_element(cache.begin(), cache.end(),
-                                        [](const Cached& a, const Cached& b) { return a.tick < b.tick; });
-            cache.erase(old);
-        }
-        cache.push_back({id, out, ++tick});
-        return out;
+        return d.data;
     }
 };
 
 Reader::Reader() : d(new Impl) {}
 Reader::~Reader() = default;
+void Reader::setSequential(Progress* prog) {
+    d->enableSequential();
+    if (prog) {
+        uint64_t t = 0;
+        for (auto& b : d->blocks) t += b.raw;
+        prog->workDone = 0;
+        prog->workTotal = t;
+        d->workProg = prog;
+    }
+}
 const std::vector<Entry>& Reader::entries() const { return d->entries; }
 const Stats& Reader::stats() const { return d->st; }
 Mode Reader::mode() const { return d->mode; }
@@ -819,13 +967,21 @@ bool Reader::open(const Source& src, std::string& err) {
     if (src.inMemory()) {
         d->size = src.mem->size();
     } else {
-        d->f.open(u8path(src.path), std::ios::binary);
-        if (!d->f) {
-            err = "cannot open " + src.path;
-            return false;
+        std::vector<std::string> vols = volumeSet(src.path);
+        if (vols.empty()) vols.push_back(src.path);
+        d->parts.resize(vols.size());
+        for (size_t i = 0; i < vols.size(); ++i) {
+            std::error_code ec;
+            uint64_t sz = fs::file_size(u8path(vols[i]), ec);
+            if (ec) {
+                err = "cannot open " + vols[i];
+                return false;
+            }
+            d->parts[i].path = vols[i];
+            d->parts[i].offset = d->size;
+            d->parts[i].size = sz;
+            d->size += sz;
         }
-        d->f.seekg(0, std::ios::end);
-        d->size = (uint64_t)d->f.tellg();
     }
     if (d->size < kHeaderSize + kFooterSize) {
         err = "file too small to be a KMP archive";
@@ -862,7 +1018,7 @@ bool Reader::open(const Source& src, std::string& err) {
     }
     try {
         InBuf in{raw.data(), raw.data() + raw.size()};
-        d->mode = (Mode)std::min<uint64_t>(in.var(), 3);
+        d->mode = (Mode)std::min<uint64_t>(in.var(), 5);
         uint64_t nb = in.var();
         if (nb > raw.size()) throw std::runtime_error("bad block count");
         d->blocks.resize((size_t)nb);
@@ -921,6 +1077,24 @@ bool Reader::open(const Source& src, std::string& err) {
         if (d->entries[i].type == EntryType::File) d->st.files++;
         d->byPath[d->entries[i].path] = (int)i;
     }
+    d->orderPos.assign(d->blocks.size(), -1);
+    d->lastNeed.assign(d->blocks.size(), -1);
+    int front = -1;
+    for (auto& e : d->entries)
+        for (uint32_t cid : e.chunks) {
+            uint32_t b = d->chunks[cid].block;
+            if (d->orderPos[b] < 0) {
+                d->orderPos[b] = (int)d->order.size();
+                d->order.push_back(b);
+            }
+            front = std::max(front, d->orderPos[b]);
+            d->lastNeed[b] = front;
+        }
+    for (uint32_t b = 0; b < d->blocks.size(); ++b)
+        if (d->orderPos[b] < 0) {
+            d->orderPos[b] = (int)d->order.size();
+            d->order.push_back(b);
+        }
     return true;
 }
 
@@ -971,7 +1145,7 @@ bool isKmp(const Source& src) {
         if (src.mem->size() < 8) return false;
         std::memcpy(m, src.mem->data(), 8);
     } else {
-        std::ifstream f(u8path(src.path), std::ios::binary);
+        std::ifstream f(u8path(firstVolume(src.path)), std::ios::binary);
         if (!f.read((char*)m, 8)) return false;
     }
     return std::memcmp(m, kMagic, 8) == 0;
