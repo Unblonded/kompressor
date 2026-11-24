@@ -105,10 +105,10 @@ std::string commonParent(const std::vector<std::string>& inputs) {
 #endif
     };
     std::vector<fs::path> common;
-    for (auto& part : norm(inputs[0])) common.push_back(part);
+    for (const auto& part : norm(inputs[0])) common.push_back(part);
     for (size_t i = 1; i < inputs.size(); ++i) {
         std::vector<fs::path> parts;
-        for (auto& part : norm(inputs[i])) parts.push_back(part);
+        for (const auto& part : norm(inputs[i])) parts.push_back(part);
         size_t k = 0;
         while (k < common.size() && k < parts.size() && same(common[k], parts[k])) ++k;
         common.resize(k);

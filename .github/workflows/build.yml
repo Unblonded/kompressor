@@ -60,7 +60,7 @@ jobs:
       - name: Configure (Universal 2)
         run: cmake --preset macos-universal
       - name: Build
-        run: cmake --build --preset macos-universal
+        run: cmake --build --preset macos-universal -- -k 0  # report every compile error, not just the first
       - name: Check architectures + smoke test
         run: |
           lipo -info build/macos-universal/Kompressor.app/Contents/MacOS/Kompressor
