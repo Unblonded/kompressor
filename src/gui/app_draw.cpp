@@ -14,6 +14,7 @@
 #include "native_files.hpp"
 #include "theme.hpp"
 #include "shell_integration.hpp"
+#include "kz_gpu.hpp"
 #include "kz_perf.hpp"
 #include "prefs.hpp"
 #include "window_frame.hpp"
@@ -2476,6 +2477,28 @@ void App::drawSettings() {
                        "memory. The computer may feel slower and run hotter meanwhile.");
 #endif
     ImGui::PopStyleColor();
+    if (kz::gpu::supported()) {
+        ImGui::Dummy(ImVec2(0, em * 0.4f));
+        if (toggle("Use the graphics card too", &useGpu_)) {
+            if (useGpu_ && !kz::gpu::available()) {
+                useGpu_ = false;
+                log(col::Error, "No graphics card that Kompressor can use was found (it needs Direct3D 11).");
+                toast(col::Error, "No usable graphics card found");
+            }
+            prefs::setBool("UseGpu", useGpu_);
+            kz::gpu::setEnabled(useGpu_);
+            if (useGpu_) log(col::Dim, "The graphics card (" + kz::gpu::adapterName() + ") will help with ZIP compression.");
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, col::Dim);
+        std::string card = kz::gpu::adapterName();
+        ImGui::TextWrapped("%s", ("While a ZIP is made, " + (card.empty() ? std::string("the graphics card") : card) +
+                                  " searches for repeated data alongside the CPU. It takes the pieces it can finish "
+                                  "before the CPU would get to them, so it only ever speeds a job up (most on big "
+                                  "jobs and high levels). The ZIP stays a normal one any app opens, about the same "
+                                  "size. Other formats can't be split up like this and stay on the CPU.")
+                                     .c_str());
+        ImGui::PopStyleColor();
+    }
     ImGui::Dummy(ImVec2(0, em * 0.6f));
     caption("INTERFACE");
     toggle("Show the activity panel", &showActivity_);

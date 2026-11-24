@@ -12,6 +12,7 @@
 #include "kz_cm.hpp"
 #include "kz_advisor.hpp"
 #include "kz_archive.hpp"
+#include "kz_gpu.hpp"
 #include "kz_perf.hpp"
 
 #ifdef _WIN32
@@ -41,7 +42,8 @@ static void usage() {
         "  kompressor-cli advise  <files/folders...>   (which format suits these files, for each goal)\n"
         "  kompressor-cli formats\n\n"
         "  create, super and convert also take -v <size> to split the result into parts (e.g. -v 100m, -v 4g)\n"
-        "  --max-cpu   maximum performance: every core at high priority, no power throttling, fastest power plan\n",
+        "  --max-cpu   maximum performance: every core at high priority, no power throttling, fastest power plan\n"
+        "  --gpu       let the graphics card search for matches too (ZIP; Windows)\n",
         KZ_VERSION);
 }
 
@@ -113,7 +115,7 @@ int main(int argc, char** argv) {
     std::string password, outDir, mode = "ultra", encrypt, intoDir;
     int level = -1, threads = 0;
     uint64_t volumeSize = 0;
-    bool skipExisting = false, dedup = true, maxCpu = false;
+    bool skipExisting = false, dedup = true, maxCpu = false, useGpu = false;
     for (size_t i = 2; i < args.size(); ++i) {
         const std::string& a = args[i];
         auto next = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : std::string(); };
@@ -135,12 +137,19 @@ int main(int argc, char** argv) {
         else if (a == "--skip-existing") skipExisting = true;
         else if (a == "--no-dedup") dedup = false;
         else if (a == "--max-cpu") maxCpu = true;
+        else if (a == "--gpu") useGpu = true;
         else pos.push_back(a);
     }
 
     Progress prog;
     std::string err;
 
+    if (useGpu) {
+        gpu::setEnabled(true);
+        // Opened before the work starts: with every core busy, the driver takes seconds to start up.
+        if (gpu::available()) std::fprintf(stderr, "graphics card: %s\n", gpu::adapterName().c_str());
+        else std::fprintf(stderr, "graphics card: none usable, the CPU does all the work\n");
+    }
     perf::recoverPowerPlan();
     struct Boost {  // released on every way out of main()
         explicit Boost(bool on) {

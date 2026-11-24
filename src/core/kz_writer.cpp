@@ -81,13 +81,12 @@ struct EditPlan {
 
 // Copies exactly `size` bytes of an open file into `put` (cut short, or zero-padded if the file changed
 // since it was scanned) so writers that announced the size in a header stay consistent.
-bool pumpFile(std::ifstream& in, uint64_t size, std::vector<char>& buf, Progress& prog,
+bool pumpFile(InFile& in, uint64_t size, std::vector<char>& buf, Progress& prog,
               const std::function<bool(const char*, size_t)>& put) {
     uint64_t left = size;
-    while (left && in) {
-        in.read(buf.data(), (std::streamsize)std::min<uint64_t>(left, buf.size()));
-        std::streamsize n = in.gcount();
-        if (n <= 0) break;
+    while (left) {
+        size_t n = in.read(buf.data(), (size_t)std::min<uint64_t>(left, buf.size()));
+        if (n == 0) break;
         if (!put(buf.data(), (size_t)n)) return false;
         left -= (uint64_t)n;
         prog.done += (uint64_t)n;
@@ -146,17 +145,16 @@ bool createKmp(const std::vector<InputItem>& items, const std::string& outPath, 
             return false;
         }
         prog.setStatus(f->arcPath);
-        std::ifstream in(f->source, std::ios::binary);
+        InFile in(f->source);
         if (!in) {
             prog.warn("Cannot read " + pathToUtf8(f->source) + " (skipped)");
             prog.done += f->size;
             continue;
         }
         w.beginFile(f->arcPath, f->mode, f->mtime);
-        while (in) {
-            in.read(buf.data(), (std::streamsize)buf.size());
-            std::streamsize n = in.gcount();
-            if (n <= 0) break;
+        for (;;) {
+            size_t n = in.read(buf.data(), buf.size());
+            if (n == 0) break;
             if (!w.write(buf.data(), (size_t)n)) break;
             prog.done += (uint64_t)n;
             if (prog.cancelled()) break;
@@ -383,7 +381,7 @@ bool createDirect(const std::vector<InputItem>& items, const std::string& outPat
             w.addSymlink(it.arcPath, it.linkTarget, it.mtime);
             continue;
         }
-        std::ifstream in(it.source, std::ios::binary);
+        InFile in(it.source);
         if (!in) {
             prog.warn("Cannot read " + pathToUtf8(it.source) + " (skipped)");
             prog.done += it.size;
@@ -391,10 +389,9 @@ bool createDirect(const std::vector<InputItem>& items, const std::string& outPat
         }
         w.expectSize(it.size);
         w.beginFile(it.arcPath, it.mode, it.mtime);
-        while (in) {
-            in.read(buf.data(), (std::streamsize)buf.size());
-            std::streamsize n = in.gcount();
-            if (n <= 0) break;
+        for (;;) {
+            size_t n = in.read(buf.data(), buf.size());
+            if (n == 0) break;
             if (!w.write(buf.data(), (size_t)n)) {
                 err = w.error();
                 w.abort();
@@ -479,9 +476,9 @@ bool createLibarchive(const std::vector<InputItem>& items, const std::string& ou
             archive_entry_set_perm(e, it.mode ? it.mode : 0644);
             archive_entry_set_size(e, (la_int64_t)it.size);
         }
-        std::ifstream in;
+        InFile in;
         if (!it.isDir && !it.isSymlink) {
-            in.open(it.source, std::ios::binary);
+            in.open(it.source);
             if (!in) {
                 prog.warn("Cannot read " + pathToUtf8(it.source) + " (skipped)");
                 archive_entry_free(e);
@@ -501,12 +498,11 @@ bool createLibarchive(const std::vector<InputItem>& items, const std::string& ou
             continue;
         }
         archive_entry_free(e);
-        if (in.is_open()) {
+        if (in.isOpen()) {
             uint64_t written = 0;
-            while (in && written < it.size) {
-                in.read(buf.data(), (std::streamsize)std::min<uint64_t>(buf.size(), it.size - written));
-                std::streamsize n = in.gcount();
-                if (n <= 0) break;
+            while (written < it.size) {
+                size_t n = in.read(buf.data(), (size_t)std::min<uint64_t>(buf.size(), it.size - written));
+                if (n == 0) break;
                 if (archive_write_data(a, buf.data(), (size_t)n) < 0) {
                     err = archive_error_string(a) ? archive_error_string(a) : "write failed";
                     ok = false;
@@ -762,7 +758,7 @@ static bool convertToKmpImpl(const Source& src, const std::string& outPath, cons
                 w.addSymlink(it.arcPath, it.linkTarget, it.mode, it.mtime);
                 continue;
             }
-            std::ifstream in(it.source, std::ios::binary);
+            InFile in(it.source);
             if (!in) {
                 prog.warn("Cannot read " + pathToUtf8(it.source) + " (skipped)");
                 continue;
@@ -1125,14 +1121,14 @@ static bool convertWhole(const Source& src, const std::string& outPath, const Co
             ce.path = it.arcPath;
             ce.mode = it.mode;
             ce.mtime = it.mtime;
-            std::ifstream in;
+            InFile in;
             if (it.isDir) {
                 ce.type = 1;
             } else if (it.isSymlink) {
                 ce.type = 2;
                 ce.link = it.linkTarget;
             } else {
-                in.open(it.source, std::ios::binary);
+                in.open(it.source);
                 if (!in) {
                     prog.warn("Cannot read " + pathToUtf8(it.source) + " (skipped)");
                     continue;

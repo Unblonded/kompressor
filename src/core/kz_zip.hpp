@@ -6,6 +6,9 @@
 // deflate stream that any unzip tool reads. Small files are whole chunks, so many of them compress
 // at once too. Entries carry UTF-8 names, Unix modes, extended timestamps and ZIP64 records where
 // sizes or offsets need them. Encrypted ZIPs keep going through libarchive (AES-256).
+//
+// With "use the graphics card too" on, the card's thread takes batches of the newest pieces whenever
+// it will finish them before the CPU threads would reach them (kz_gpu.hpp), so it only adds speed.
 #pragma once
 
 #include <memory>
@@ -32,6 +35,7 @@ public:
     void setProgress(Progress* p) override;
 
 private:
+    void stopWorkers();
     struct Impl;
     std::unique_ptr<Impl> d;
 };

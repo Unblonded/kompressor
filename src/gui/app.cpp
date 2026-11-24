@@ -13,6 +13,7 @@
 #include "app_util.hpp"
 #include "theme.hpp"
 #include "shell_integration.hpp"
+#include "kz_gpu.hpp"
 #include "kz_perf.hpp"
 #include "prefs.hpp"
 
@@ -146,6 +147,9 @@ App::App(GLFWwindow* window, ImFont* mono, float scale) : window_(window), mono_
     shellMenu_ = shell::registered();
     maxPerf_ = prefs::getBool("MaxPerformance", false);
     kz::perf::setMaxPerformance(maxPerf_);
+    useGpu_ = kz::gpu::supported() && prefs::getBool("UseGpu", false);
+    kz::gpu::setEnabled(useGpu_);
+    if (useGpu_) kz::gpu::warmUp();
     startTempCleanup();
     log(col::Dim, std::string("Kompressor ") + KZ_VERSION + " ready. Drop files or archives onto the window.");
 }

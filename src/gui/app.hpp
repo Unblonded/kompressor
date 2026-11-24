@@ -220,6 +220,7 @@ private:
     std::string lastDir_;
     bool shellMenu_ = false;  // Explorer right-click menu installed
     bool maxPerf_ = false;    // Settings: maximum performance while compressing / extracting
+    bool useGpu_ = false;     // Settings: let the graphics card help (ZIP)
     void updateBoost();
     int directJobs_ = 0;  // extractFile() / quickCompress() jobs still running or waiting for a password
     bool directFailed_ = false, quitWhenDone_ = false;

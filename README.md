@@ -11,6 +11,7 @@ A cross-platform (Windows · macOS · Linux) file compressor written in C++17 wi
 * **Recognises archives by their content**, not their name: a 7z called `.zip`, a ZIP called `.png` or an archive with no extension at all opens, extracts and gets the right-click entries as what it really is (also inside other archives), and Kompressor says what it really is.
 * Integrity **Test**, password prompts, background jobs you can **pause**, resume or cancel, drag & drop.
 * **Maximum performance** mode (Settings, or `--max-cpu` in the CLI): while a job runs it gets every core at high priority, Windows power throttling off, the fastest power plan (yours comes back afterwards) and no sleep.
+* **Graphics card help** for ZIP (Settings, or `--gpu` in the CLI; Windows): the graphics card searches for repeated data alongside the CPU through Direct3D 11 compute shaders, which come with Windows. It takes only the pieces it will finish before the CPU would get to them, so it never slows a job down. The result is an ordinary ZIP about the same size.
 * A scriptable `kompressor-cli` built from the same core.
 
 ## The KMP super format

@@ -12,12 +12,17 @@
 
 namespace kz {
 
+// Puts the calling thread one step below normal priority (kz_common.cpp): pool workers keep every
+// core busy, but the threads that feed them (file reading, the graphics card) and the window come first.
+void setWorkerPriority();
+
 class ThreadPool {
 public:
     explicit ThreadPool(unsigned threads) {
         if (threads == 0) threads = 1;
         for (unsigned i = 0; i < threads; ++i)
             workers_.emplace_back([this] {
+                setWorkerPriority();
                 for (;;) {
                     std::function<void()> job;
                     {

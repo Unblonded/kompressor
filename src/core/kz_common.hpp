@@ -143,4 +143,30 @@ void initLocale();
 // Command line arguments as UTF-8 on every platform (Windows re-reads the wide command line).
 std::vector<std::string> utf8Args(int argc, char** argv);
 
+// A file read front to back, straight from the OS. (MSVC's ifstream tops out near 1 GB/s on cached
+// files, eight times slower than ReadFile, which held whole archive jobs back.)
+class InFile {
+public:
+    InFile() = default;
+    explicit InFile(const fs::path& p) { open(p); }
+    ~InFile() { close(); }
+    InFile(const InFile&) = delete;
+    InFile& operator=(const InFile&) = delete;
+    bool open(const fs::path& p);
+    void close();
+    bool isOpen() const;
+    explicit operator bool() const { return isOpen() && !failed_; }
+    bool operator!() const { return !bool(*this); }
+    // Up to n bytes; 0 at the end of the file or on a read error.
+    size_t read(void* dst, size_t n);
+
+private:
+#ifdef _WIN32
+    void* h_ = nullptr;
+#else
+    int fd_ = -1;
+#endif
+    bool failed_ = false;
+};
+
 }  // namespace kz

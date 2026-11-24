@@ -22,6 +22,8 @@
 #endif
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <cerrno>
+#include <fcntl.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
@@ -245,6 +247,69 @@ void initLocale() {
         if (!std::setlocale(LC_CTYPE, "C.UTF-8")) std::setlocale(LC_CTYPE, "en_US.UTF-8");
     }
 #endif
+}
+
+void setWorkerPriority() {
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+}
+
+bool InFile::open(const fs::path& p) {
+    close();
+    failed_ = false;
+#ifdef _WIN32
+    HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    h_ = h;
+#else
+    fd_ = ::open(p.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd_ < 0) return false;
+#endif
+    return true;
+}
+
+void InFile::close() {
+#ifdef _WIN32
+    if (h_) CloseHandle((HANDLE)h_);
+    h_ = nullptr;
+#else
+    if (fd_ >= 0) ::close(fd_);
+    fd_ = -1;
+#endif
+}
+
+bool InFile::isOpen() const {
+#ifdef _WIN32
+    return h_ != nullptr;
+#else
+    return fd_ >= 0;
+#endif
+}
+
+size_t InFile::read(void* dst, size_t n) {
+    if (!isOpen() || failed_) return 0;
+    size_t got = 0;
+    while (got < n) {
+#ifdef _WIN32
+        DWORD want = (DWORD)std::min<size_t>(n - got, 1u << 30), r = 0;
+        if (!ReadFile((HANDLE)h_, (char*)dst + got, want, &r, nullptr)) {
+            failed_ = true;
+            break;
+        }
+#else
+        ssize_t r = ::read(fd_, (char*)dst + got, std::min<size_t>(n - got, 1u << 30));
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            failed_ = true;
+            break;
+        }
+#endif
+        if (r == 0) break;
+        got += (size_t)r;
+    }
+    return got;
 }
 
 std::vector<std::string> utf8Args(int argc, char** argv) {
