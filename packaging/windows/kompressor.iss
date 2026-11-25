@@ -1,11 +1,11 @@
 ; Kompressor installer (Inno Setup 6).
 ; Build with packaging/windows/build_installer.ps1, or:
-;   ISCC.exe /DAppVersion=1.0.0 /DBuildDir=..\..\build\windows packaging\windows\kompressor.iss
+;   ISCC.exe /DAppVersion=2.1.0 /DBuildDir=..\..\build\windows packaging\windows\kompressor.iss
 ;
 ; Installs per user (no admin): %LOCALAPPDATA%\Programs\Kompressor.
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "2.1.0"
 #endif
 #ifndef BuildDir
   #define BuildDir "..\..\build\windows"
