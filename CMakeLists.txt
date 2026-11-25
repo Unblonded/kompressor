@@ -89,6 +89,7 @@ add_library(kompressor_core STATIC
   src/core/kz_7z.cpp
   src/core/kz_inflate.cpp
   src/core/kz_zipx.cpp
+  src/core/kz_repair.cpp
   src/core/kz_writer.cpp
   src/core/kmp.cpp
   src/core/kz_parallel.cpp

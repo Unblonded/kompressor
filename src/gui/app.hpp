@@ -251,6 +251,8 @@ private:
     void actionOpen();
     void actionExtract(ExplorerTab& t, bool selectionOnly);
     void actionTest(ExplorerTab& t);
+    // Rebuilds a damaged ZIP from its intact entries, or extracts every intact file of anything else.
+    void runRepair(int tabId);
     // Checksums window (app_hash.cpp): every file, or the selected ones.
     void actionHash(ExplorerTab& t, bool selectionOnly);
     void runHash(unsigned which);

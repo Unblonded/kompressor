@@ -22,6 +22,7 @@ bool Inflater::fill(unsigned k) {
     while (bitcnt_ < k) {
         if (inAt_ == inHave_) {
             inHave_ = inEnd_ ? 0 : src_(in_.data(), in_.size());
+            pulled_ += inHave_;
             inAt_ = 0;
             if (!inHave_) {
                 inEnd_ = true;
@@ -79,6 +80,7 @@ bool Inflater::symbol(const std::vector<uint32_t>& t, unsigned& sym) {
     while (bitcnt_ < kTableBits) {
         if (inAt_ == inHave_ && !inEnd_) {
             inHave_ = src_(in_.data(), in_.size());
+            pulled_ += inHave_;
             inAt_ = 0;
             if (!inHave_) inEnd_ = true;
         }
@@ -207,6 +209,7 @@ bool Inflater::step() {
             while (storedLeft_ && pending_ < 65536) {
                 if (inAt_ == inHave_) {
                     inHave_ = inEnd_ ? 0 : src_(in_.data(), in_.size());
+            pulled_ += inHave_;
                     inAt_ = 0;
                     if (!inHave_) {
                         inEnd_ = true;

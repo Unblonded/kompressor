@@ -670,6 +670,9 @@ void App::drawMenuBar() {
         if (ImGui::MenuItem("Extract All...")) actionExtract(*at, false);
         if (ImGui::MenuItem("Extract Selected...", nullptr, false, !at->selection.empty())) actionExtract(*at, true);
         if (ImGui::MenuItem("Test Integrity")) actionTest(*at);
+        if (ImGui::MenuItem("Repair...")) runRepair(at->id);
+        ImGui::SetItemTooltip("Damaged archive? A ZIP is rebuilt from the entries that are still intact; for other "
+                              "formats every file that reads back intact is extracted into a folder.");
         if (ImGui::MenuItem("Checksums...")) actionHash(*at, false);
         ImGui::SetItemTooltip("CRC32, MD5, SHA-1 and SHA-256 of every file, and checking them against a list");
         std::string kF = std::string(kMod) + "+Shift+F";
@@ -1071,10 +1074,17 @@ void App::drawExplorer(ExplorerTab& t) {
         }
         ImGui::Dummy(ImVec2(0, em));
         float bw = em * 8;
-        ImGui::SetCursorPosX((avail.x - bw * 2 - em * 0.6f) * 0.5f);
+        bool canRepair = !t.error.empty() && !locked;
+        int nb = canRepair ? 3 : 2;
+        ImGui::SetCursorPosX((avail.x - bw * nb - em * 0.6f * (nb - 1)) * 0.5f);
         if (secondaryButton("Retry", ImVec2(bw, 0))) loadTab(t.id);
         ImGui::SameLine(0, em * 0.6f);
         int id = t.id;
+        if (canRepair) {
+            if (secondaryButton("Repair", ImVec2(bw, 0))) runRepair(id);
+            ImGui::SetItemTooltip("Get back whatever is still intact: a ZIP is rebuilt, other formats are extracted as far as they read");
+            ImGui::SameLine(0, em * 0.6f);
+        }
         if (primaryButton("Password", Ico::Lock, ImVec2(bw, ImGui::GetFrameHeight() * 1.1f)))
             askPassword("Password for \"" + t.title + "\":", [this, id](const std::string& pw) {
                 if (ExplorerTab* t = tabById(id)) {

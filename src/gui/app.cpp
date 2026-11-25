@@ -16,6 +16,7 @@
 #include "kz_gpu.hpp"
 #include "kz_perf.hpp"
 #include "kz_sfx.hpp"
+#include "kz_repair.hpp"
 #include "prefs.hpp"
 
 #ifdef _WIN32
@@ -836,6 +837,47 @@ void App::testArchiveFile(const std::string& path) {
 }
 
 void App::actionTest(ExplorerTab& t) { runTest(t.id); }
+
+void App::runRepair(int tabId) {
+    ExplorerTab* t = tabById(tabId);
+    if (!t) return;
+    kz::Source src = t->src;
+    std::string title = t->title, pw = t->password;
+    auto res = std::make_shared<kz::RepairResult>();
+    startJob("Repairing " + title,
+        [src, pw, res](kz::Progress& p, std::string& err) { return kz::repairArchive(src, "", pw, p, *res, err); },
+        [this, tabId, title, res](Job& j) {
+            for (auto& w : j.prog->warnings()) log(col::Warn, w);
+            if (j.ok) {
+                std::string where = kz::fileNameOf(res->output);
+                log(res->lost ? col::Warn : col::Ok,
+                    title + (res->rebuilt ? ": repaired into " : ": recovered into ") + where + " - " + res->summary,
+                    res->output, res->output);
+                size_t shown = 0;
+                for (auto& n : res->lostNames) {
+                    if (++shown > 20) {
+                        log(col::Dim, "  ... and " + std::to_string(res->lostNames.size() - 20) + " more lost");
+                        break;
+                    }
+                    log(col::Dim, "  lost: " + n);
+                }
+                toast(res->lost ? col::Warn : col::Ok, std::to_string(res->recovered) + " files recovered" +
+                                                           (res->lost ? ", " + std::to_string(res->lost) + " lost" : ""));
+                if (res->rebuilt) openArchive(res->output);
+                else reveal(res->output);
+            } else if (j.prog->needPassword) {
+                askPassword("Password needed to repair \"" + title + "\":", [this, tabId](const std::string& pw) {
+                    if (ExplorerTab* t = tabById(tabId)) {
+                        t->password = pw;
+                        runRepair(tabId);
+                    }
+                });
+            } else {
+                log(col::Error, title + ": repair failed - " + j.message);
+                toast(col::Error, title + ": nothing could be recovered");
+            }
+        });
+}
 
 void App::openInExplorer(ExplorerTab& t) {
     if (t.src.inMemory()) return;

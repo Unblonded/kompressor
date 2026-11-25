@@ -19,6 +19,8 @@ public:
     size_t read(uint8_t* out, size_t n);
     const std::string& error() const { return err_; }
     bool done() const { return done_ && pending_ == 0; }
+    // Compressed bytes the stream used so far (at its end: its exact length).
+    uint64_t consumed() const { return pulled_ - (inHave_ - inAt_) - bitcnt_ / 8; }
 
 private:
     bool bits(unsigned k, uint32_t& v);
@@ -34,6 +36,7 @@ private:
     std::vector<uint8_t> in_ = std::vector<uint8_t>(1 << 16);
     size_t inAt_ = 0, inHave_ = 0;
     bool inEnd_ = false;
+    uint64_t pulled_ = 0;
     uint64_t bitbuf_ = 0;
     unsigned bitcnt_ = 0;
 

@@ -17,6 +17,7 @@
 #include "kz_archive.hpp"
 #include "kz_gpu.hpp"
 #include "kz_hash.hpp"
+#include "kz_repair.hpp"
 #include "kz_search.hpp"
 #include "kz_perf.hpp"
 #include "kz_ramdrive.hpp"
@@ -46,6 +47,8 @@ static void usage() {
         "  kompressor-cli grep    <archive> <text> [--case] [--hex] [--names \"*.txt;*.ini\"] [-p password] [entry...]\n"
         "                         (find text - UTF-8 or UTF-16 - or hex bytes inside the files; case-insensitive unless --case)\n"
         "  kompressor-cli cat     <archive> <entry> [-p password]      (write one member to stdout)\n"
+        "  kompressor-cli repair  <archive> [-o out] [-p password]\n"
+        "                         (a ZIP is rebuilt from its intact entries; other formats: every intact file is extracted)\n"
         "  kompressor-cli create  <out.zip|.7z|.tar.xz|...> <files/folders...> [-l level] [-p password] [-t threads]\n"
         "  kompressor-cli super   <out.kmp> <files/folders...> [-m fast|balanced|ultra|max|extreme|ultimate] [-t threads] [--no-dedup]\n"
         "  kompressor-cli convert <archive> <out.zip|.7z|.tar.zst|.kmp|...> [-l level] [-m mode] [-p password]\n"
@@ -310,6 +313,21 @@ int main(int argc, char** argv) {
         }
         std::printf("OK - archive is intact\n");
         return 0;
+    }
+
+    if (cmd == "repair") {
+        if (pos.empty()) return usage(), 1;
+        Source src{pos[0], nullptr, ""};
+        RepairResult res;
+        bool ok = run(prog, [&] { return repairArchive(src, outDir, password, prog, res, err); });
+        printWarnings(prog);
+        if (!ok) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 2;
+        }
+        std::printf("%s %s\n  %s\n", res.rebuilt ? "Repaired archive:" : "Recovered files in:", res.output.c_str(), res.summary.c_str());
+        for (auto& n : res.lostNames) std::printf("  lost: %s\n", n.c_str());
+        return res.lost ? 3 : 0;
     }
 
     if (cmd == "hash" || cmd == "h" || cmd == "sum") {
