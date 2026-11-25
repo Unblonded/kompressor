@@ -7,6 +7,7 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -15,6 +16,7 @@
 
 #include "file_dialog.hpp"
 #include "kz_hash.hpp"
+#include "kz_search.hpp"
 #include "kz_advisor.hpp"
 #include "kz_archive.hpp"
 
@@ -116,6 +118,9 @@ struct ExplorerTab {
     std::string previewError;
     std::shared_ptr<kz::Progress> previewProg;
     int previewMode = 0;  // 0 auto, 1 text, 2 hex
+    // A spot to scroll the preview to and mark once it has loaded (a search hit): byte offset, or none.
+    uint64_t previewMark = UINT64_MAX;
+    int previewJump = 0;  // frames left to keep scrolling there (the first frame may not know the height)
     float previewWidth = 0.0f;  // fraction of the explorer width
     // editing (adding / deleting entries)
     bool editable = false;      // Kompressor can write this archive back
@@ -160,6 +165,9 @@ public:
     void debugRecompress() { debugRecompress_ = true; }
     // Debug aid: open the Checksums window once the active archive has loaded (and check `list`, if given).
     void debugHash(const std::string& list) { debugHash_ = true, debugHashList_ = list; }
+    // Debug aid: open Find in Files once the active archive has loaded and search it for `text`.
+    // (then shows the first file's last listed hit, as a click on it would).
+    void debugSearch(const std::string& text) { debugSearch_ = text, debugSearchJump_ = true; }
     bool busy() const;
     // Debug aid for --snapshot: navigate to and preview an entry once the active tab has loaded.
     void debugSelect(const std::string& entryPath) { debugSelect_ = entryPath; }
@@ -239,6 +247,11 @@ private:
     void loadHashList(const std::string& path);
     void saveHashList(kz::HashKind k);
     void drawHashWindow();
+    // Find in Files (app_search.cpp): text or bytes inside every file, or the selected ones.
+    void actionSearch(ExplorerTab& t, bool selectionOnly);
+    void runSearch();
+    void showSearchHit(const kz::FileHits& f, const kz::SearchHit* h);
+    void drawSearchWindow();
     // Opens the tab's archive in Windows File Explorer, or shows it there when Explorer can't browse it.
     void openInExplorer(ExplorerTab& t);
     void actionConvert(ExplorerTab& t, bool super = false);  // recompress into another format
@@ -269,7 +282,8 @@ private:
     bool showAbout_ = false;
     bool showSettings_ = false;
     bool debugDetach_ = false, debugRecompress_ = false, debugHash_ = false;
-    std::string debugHashList_;
+    std::string debugHashList_, debugSearch_;
+    bool debugSearchJump_ = false;
     std::string lastDir_;
     bool shellMenu_ = false;  // Explorer right-click menu installed
     bool maxPerf_ = false;    // Settings: maximum performance while compressing / extracting
@@ -349,6 +363,31 @@ private:
         char filter[128] = {};
         bool problemsOnly = false;
     } hash_;
+    struct SearchState {
+        bool open = false, focus = false, focusInput = false;
+        int tabId = -1;
+        kz::Source src;
+        std::string title, password, scope;
+        std::vector<std::string> only;
+        char query[256] = {};
+        char names[128] = {};
+        int mode = 0;  // 0 text, 1 hex
+        bool matchCase = false;
+        bool running = false;
+        int runId = 0;
+        std::shared_ptr<kz::Progress> prog;
+        // Files with hits arrive from the worker thread while it runs.
+        struct Feed {
+            std::mutex mu;
+            std::vector<kz::FileHits> files;
+        };
+        std::shared_ptr<Feed> feed;
+        std::vector<kz::FileHits> files;
+        uint64_t total = 0;          // matches in `files`
+        std::string error, searched;  // `searched`: the query the results are for
+        bool done = false;
+        std::set<std::string> collapsed;
+    } search_;
     void drawSplitOption(bool* on, int* preset, int* customMb, float inner);
     // "Recommended for you": goal picker, the suggested format with its reasons and estimates, and a button
     // that applies it. Returns true when the user clicked "Use this" (`out` holds the recommendation).

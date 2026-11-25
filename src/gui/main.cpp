@@ -200,6 +200,13 @@ int main(int argc, char** argv) {
             args.erase(args.begin() + i, args.begin() + i + n);
             break;
         }
+    std::string debugSearch;
+    for (size_t i = 1; i + 1 < args.size(); ++i)
+        if (args[i] == "--debug-search") {
+            debugSearch = args[i + 1];
+            args.erase(args.begin() + i, args.begin() + i + 2);
+            break;
+        }
     std::string shellAction;
     std::vector<std::string> shellPaths;
     if (args.size() >= 3 && args[1] == "--shell") {
@@ -301,6 +308,7 @@ int main(int argc, char** argv) {
         if (debugDetach) app.debugDetach();
         if (debugRecompress) app.debugRecompress();
         if (debugHash) app.debugHash(debugHashList);
+        if (!debugSearch.empty()) app.debugSearch(debugSearch);
 
         // Files passed on the command line / "Open with": archives open, anything else is queued to compress.
         std::vector<std::string> toCompress;

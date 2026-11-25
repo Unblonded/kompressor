@@ -519,6 +519,8 @@ void App::requestPreview(ExplorerTab& t, int node) {
     if (t.previewProg) t.previewProg->cancel = true;
     t.previewProg.reset();
     t.previewNode = node;
+    t.previewMark = UINT64_MAX;
+    t.previewJump = 0;
     t.preview.clear();
     t.lineStarts.clear();
     t.previewError.clear();

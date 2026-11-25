@@ -8,6 +8,7 @@
 #include <functional>
 #include <iterator>
 #include <iostream>
+#include <mutex>
 #include <thread>
 
 #include "kmp.hpp"
@@ -16,6 +17,7 @@
 #include "kz_archive.hpp"
 #include "kz_gpu.hpp"
 #include "kz_hash.hpp"
+#include "kz_search.hpp"
 #include "kz_perf.hpp"
 
 #ifdef _WIN32
@@ -37,6 +39,8 @@ static void usage() {
         "  kompressor-cli test    <archive> [-p password]\n"
         "  kompressor-cli hash    <archive> [-a crc32|md5|sha1|sha256|all] [-c list] [-p password] [entry...]\n"
         "                         (checksums of the files inside; -c checks them against a .sha256/.md5/.sfv list)\n"
+        "  kompressor-cli grep    <archive> <text> [--case] [--hex] [--names \"*.txt;*.ini\"] [-p password] [entry...]\n"
+        "                         (find text - UTF-8 or UTF-16 - or hex bytes inside the files; case-insensitive unless --case)\n"
         "  kompressor-cli cat     <archive> <entry> [-p password]      (write one member to stdout)\n"
         "  kompressor-cli create  <out.zip|.7z|.tar.xz|...> <files/folders...> [-l level] [-p password] [-t threads]\n"
         "  kompressor-cli super   <out.kmp> <files/folders...> [-m fast|balanced|ultra|max|extreme|ultimate] [-t threads] [--no-dedup]\n"
@@ -120,7 +124,8 @@ int main(int argc, char** argv) {
     std::string password, outDir, mode = "ultra", encrypt, intoDir, algo = "sha256", checkList;
     int level = -1, threads = 0;
     uint64_t volumeSize = 0;
-    bool skipExisting = false, dedup = true, maxCpu = false, useGpu = false;
+    bool skipExisting = false, dedup = true, maxCpu = false, useGpu = false, matchCase = false, hexSearch = false;
+    std::string names;
     for (size_t i = 2; i < args.size(); ++i) {
         const std::string& a = args[i];
         auto next = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : std::string(); };
@@ -133,6 +138,9 @@ int main(int argc, char** argv) {
         else if (a == "-d") intoDir = next();
         else if (a == "-a") algo = next();
         else if (a == "-c") checkList = next();
+        else if (a == "--case") matchCase = true;
+        else if (a == "--hex") hexSearch = true;
+        else if (a == "--names") names = next();
         else if (a == "-v") {
             std::string v = next();
             volumeSize = parseSize(v);
@@ -319,6 +327,46 @@ int main(int argc, char** argv) {
             std::printf("*%s\n", h.path.c_str());
         }
         return bad ? 2 : 0;
+    }
+
+    if (cmd == "grep" || cmd == "g") {
+        if (pos.size() < 2) return usage(), 1;
+        Source src{pos[0], nullptr, ""};
+        SearchOptions so;
+        so.text = pos[1];
+        so.hex = hexSearch;
+        so.matchCase = matchCase;
+        so.names = names;
+        std::vector<std::string> only(pos.begin() + 2, pos.end());
+        std::vector<FileHits> found;
+        std::mutex mu;
+        bool ok = run(prog, [&] {
+            return searchArchive(src, only, password, so, [&](FileHits&& f) {
+                std::lock_guard<std::mutex> l(mu);
+                found.push_back(std::move(f));
+            }, prog, err);
+        });
+        printWarnings(prog);
+        if (!ok) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return prog.needPassword ? 3 : 2;
+        }
+        uint64_t total = 0;
+        size_t withHits = 0;
+        for (auto& f : found) {
+            if (!f.error.empty()) std::printf("%s: error: %s\n", f.path.c_str(), f.error.c_str());
+            if (!f.count) continue;
+            ++withHits;
+            total += f.count;
+            for (auto& h : f.hits) {
+                if (h.line) std::printf("%s:%u: %s\n", f.path.c_str(), h.line, h.snippet.c_str());
+                else std::printf("%s:@0x%llx: %s\n", f.path.c_str(), (unsigned long long)h.offset, h.snippet.c_str());
+            }
+            if (f.count > f.hits.size())
+                std::printf("%s: ... %llu more\n", f.path.c_str(), (unsigned long long)(f.count - f.hits.size()));
+        }
+        std::printf("%llu match(es) in %zu file(s)\n", (unsigned long long)total, withHits);
+        return withHits ? 0 : 1;
     }
 
     if (cmd == "cat") {

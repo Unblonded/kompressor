@@ -300,12 +300,15 @@ void App::frame() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_N, ImGuiInputFlags_RouteGlobal)) openCompressDialog({}, true);
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_W, ImGuiInputFlags_RouteGlobal) && activeTab_ >= 0) closeTab(activeTab_);
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Comma, ImGuiInputFlags_RouteGlobal)) showSettings_ = true;
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F, ImGuiInputFlags_RouteGlobal))
+        if (ExplorerTab* t = tabById(activeTab_); t && !t->loading && t->error.empty()) actionSearch(*t, false);
 
     drawCompressWindow();
     drawExtractWindow();
     drawConvertWindow();
     drawFormats();
     drawHashWindow();
+    drawSearchWindow();
     drawAbout();
     drawSettings();
     drawPasswordPopup();
@@ -398,6 +401,9 @@ void App::drawMenuBar() {
         if (ImGui::MenuItem("Test Integrity")) actionTest(*at);
         if (ImGui::MenuItem("Checksums...")) actionHash(*at, false);
         ImGui::SetItemTooltip("CRC32, MD5, SHA-1 and SHA-256 of every file, and checking them against a list");
+        std::string kF = std::string(kMod) + "+Shift+F";
+        if (ImGui::MenuItem("Find in Files...", kF.c_str())) actionSearch(*at, false);
+        ImGui::SetItemTooltip("Search the text (or bytes) inside every file, without extracting anything");
         ImGui::Separator();
         bool canEdit = at->editable && !at->editing;
         if (ImGui::MenuItem("Add Files...", nullptr, false, canEdit)) pickFilesToAdd(*at, false);
@@ -549,6 +555,9 @@ void App::drawToolbar() {
         ImGui::SameLine(0, sp);
         if (ghostButton("Checksums", Ico::Hash, ImVec2(0, bh))) actionHash(*at, !at->selection.empty());
         ImGui::SetItemTooltip("CRC32 / MD5 / SHA-1 / SHA-256 of the files (the selected ones, or all), and checking a list");
+        ImGui::SameLine(0, sp);
+        if (ghostButton("Find", Ico::Search, ImVec2(0, bh))) actionSearch(*at, !at->selection.empty());
+        ImGui::SetItemTooltip("Search the text or bytes inside the files (the selected ones, or all)");
         if (at->editable) {
             ImGui::SameLine(0, em * 0.9f);
             ImVec2 sp1 = ImGui::GetCursorScreenPos();
@@ -785,6 +794,12 @@ void App::drawExplorer(ExplorerTab& t) {
     if (debugRecompress_ && !t.loading && !t.nodes.empty()) {
         debugRecompress_ = false;
         actionConvert(t);
+    }
+    if (!debugSearch_.empty() && !t.loading && !t.nodes.empty()) {
+        actionSearch(t, false);
+        std::snprintf(search_.query, sizeof search_.query, "%s", debugSearch_.c_str());
+        debugSearch_.clear();
+        runSearch();
     }
     if (debugHash_ && !t.loading && !t.nodes.empty()) {
         debugHash_ = false;
@@ -1111,6 +1126,7 @@ void App::drawTable(ExplorerTab& t, float width) {
                 ImGui::Separator();
                 if (ImGui::MenuItem("Extract...")) actionExtract(t, true);
                 if (ImGui::MenuItem("Checksums...")) actionHash(t, true);
+                if (ImGui::MenuItem("Find in Selected...")) actionSearch(t, true);
                 std::string kC = std::string(kMod) + "+C";
                 if (native::fileTransferSupported() && ImGui::MenuItem("Copy", kC.c_str())) copySelection(t);
                 if (ImGui::MenuItem("Delete", "Del", false, t.editable && !t.editing)) askDeleteSelection(t);
@@ -1466,6 +1482,26 @@ void App::drawPreview(ExplorerTab& t) {
     ImGui::BeginChild("##content", csz, ImGuiChildFlags_AlwaysUseWindowPadding,
                       ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoBackground);
     const char* base = (const char*)t.preview.data();
+    const float lineH = ImGui::GetTextLineHeightWithSpacing();
+    const bool marked = t.previewMark < t.preview.size();
+    auto markRow = [&]() {  // tints the row the cursor is on
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float w = std::max(ImGui::GetContentRegionAvail().x, ImGui::GetWindowWidth());
+        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(ImGui::GetWindowPos().x, p.y - em * 0.06f),
+                                                  ImVec2(ImGui::GetWindowPos().x + w + ImGui::GetScrollX(), p.y + lineH - em * 0.06f),
+                                                  u32(col::Accent, 0.22f));
+    };
+    int markAt = -1;  // line (text) or row (hex) holding the mark
+    if (marked) {
+        if (asText)
+            markAt = (int)(std::upper_bound(t.lineStarts.begin(), t.lineStarts.end(), (uint32_t)t.previewMark) - t.lineStarts.begin()) - 1;
+        else
+            markAt = (int)(t.previewMark / 16);
+        if (t.previewJump > 0) {
+            --t.previewJump;
+            ImGui::SetScrollY(std::max(0.0f, markAt * lineH - ImGui::GetWindowHeight() * 0.35f));
+        }
+    }
     if (asText) {
         char num[16];
         std::snprintf(num, sizeof num, "%zu", t.lineStarts.size());
@@ -1479,6 +1515,7 @@ void App::drawPreview(ExplorerTab& t) {
                 if (e > b && base[e - 1] == '\r') --e;
                 if (e - b > 4000) e = b + 4000;
                 std::snprintf(num, sizeof num, "%d", i + 1);
+                if (i == markAt) markRow();
                 float x = ImGui::GetCursorPosX();
                 ImGui::SetCursorPosX(x + gutter - ImGui::CalcTextSize(num).x);
                 ImGui::TextColored(col::Faint, "%s", num);
@@ -1505,6 +1542,7 @@ void App::drawPreview(ExplorerTab& t) {
                     asc[m++] = (ch >= 32 && ch < 127) ? (char)ch : '.';
                 }
                 asc[m] = 0;
+                if (r == markAt) markRow();
                 ImGui::TextColored(col::Faint, "%08zX", off);
                 ImGui::SameLine(0, em * 1.0f);
                 ImGui::TextUnformatted(hex);

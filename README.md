@@ -104,6 +104,7 @@ kompressor-cli list    <archive>
 kompressor-cli extract <archive> [-o dir] [-p password] [entry...]
 kompressor-cli test    <archive>
 kompressor-cli cat     <archive> <entry>            # one member to stdout
+kompressor-cli grep    <archive> <text> [--case] [--hex] [--names "*.txt"]   # find text or bytes inside the files
 kompressor-cli hash    <archive> [-a crc32|md5|sha1|sha256|all] [-c list.sha256]   # checksums, or check a list
 kompressor-cli create  out.7z|.zip|.tar.xz|... <files/folders> [-l level] [-p pw]
 kompressor-cli super   out.kmp <files/folders> [-m fast|balanced|ultra|max|extreme|ultimate] [--no-dedup]
