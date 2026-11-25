@@ -56,7 +56,7 @@ LRESULT CALLBACK frameProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             ScreenToClient(h, &pt);
             RECT rc;
             GetClientRect(h, &rc);
-            if (!IsZoomed(h)) {
+            if (!IsZoomed(h) && (GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) {  // resizable
                 int b = resizeBorder(h);
                 bool L = pt.x < b, R = pt.x >= rc.right - b, T = pt.y < b, B = pt.y >= rc.bottom - b;
                 if (T && L) return HTTOPLEFT;
@@ -128,6 +128,39 @@ void toggleMaximize() {
     if (!g_window) return;
     if (maximized()) glfwRestoreWindow(g_window);
     else glfwMaximizeWindow(g_window);
+}
+
+void placeCentered(int w, int h) {
+    if (!g_window) return;
+    // The monitor holding the window's centre, else the primary one.
+    int wx, wy, ww, wh;
+    glfwGetWindowPos(g_window, &wx, &wy);
+    glfwGetWindowSize(g_window, &ww, &wh);
+    GLFWmonitor* mon = glfwGetPrimaryMonitor();
+    int count = 0;
+    GLFWmonitor** mons = glfwGetMonitors(&count);
+    for (int i = 0; i < count; ++i) {
+        int mx, my, mw, mh;
+        glfwGetMonitorWorkarea(mons[i], &mx, &my, &mw, &mh);
+        int cx = wx + ww / 2, cy = wy + wh / 2;
+        if (cx >= mx && cx < mx + mw && cy >= my && cy < my + mh) mon = mons[i];
+    }
+    int mx = 0, my = 0, mw = w, mh = h;
+    if (mon) glfwGetMonitorWorkarea(mon, &mx, &my, &mw, &mh);
+    w = w < mw ? w : mw;
+    h = h < mh ? h : mh;
+    int x = mx + (mw - w) / 2, y = my + (mh - h) / 2;
+#ifdef _WIN32
+    // With the custom frame the client area is the whole window, which GLFW's sizing doesn't know.
+    if (g_custom) {
+        HWND hw = glfwGetWin32Window(g_window);
+        if (IsZoomed(hw)) ShowWindow(hw, SW_RESTORE);
+        SetWindowPos(hw, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        return;
+    }
+#endif
+    glfwSetWindowSize(g_window, w, h);
+    glfwSetWindowPos(g_window, x, y);
 }
 
 void setTitleBar(float height, const std::vector<Rect>& interactive) {

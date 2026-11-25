@@ -19,6 +19,9 @@ bool custom();
 bool maximized();
 void minimize();
 void toggleMaximize();
+// Gives the window a client area of w x h pixels (screen coordinates elsewhere), centred on the monitor
+// it is on, inside the monitor's work area.
+void placeCentered(int w, int h);
 // Called every frame: the title bar spans [0, height) vertically; points inside `interactive`
 // (menus, buttons) are normal client clicks, everything else in the bar drags the window.
 void setTitleBar(float height, const std::vector<Rect>& interactive);

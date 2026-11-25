@@ -190,6 +190,106 @@ Ico logIcon(const ImVec4& c) {
     return Ico::Info;
 }
 
+// Minimize / maximize / close at the right end of a custom title bar spanning [top, top + bh), ending at
+// `right` (screen coordinates). Adds their rectangles to `hit`; returns the x where they begin.
+float windowButtons(GLFWwindow* window, float right, float top, float bh, bool maximizable, std::vector<frame::Rect>& hit) {
+    const float em = emPx();
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float bw = std::round(em * 3.1f), th = std::max(1.0f, std::round(em / 15.0f));
+    int kinds[3] = {0, 1, 2}, n = 3;
+    if (!maximizable) kinds[1] = 2, n = 2;
+    for (int k = 0; k < n; ++k) {
+        int i = kinds[k];
+        float x = right - bw * (n - k);
+        ImGui::SetCursorScreenPos(ImVec2(x, top));
+        ImGui::PushID(i);
+        bool clicked = ImGui::InvisibleButton("##wbtn", ImVec2(bw, bh));
+        bool hov = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+        float h = anim(ImGui::GetItemID(), hov, 20.0f);
+        ImGui::PopID();
+        hit.push_back({x - w->Pos.x, top - w->Pos.y, x + bw - w->Pos.x, top + bh - w->Pos.y});
+        ImVec2 a(x, top), b(x + bw, top + bh);
+        if (i == 2) {
+            if (h > 0) dl->AddRectFilled(a, b, u32(ImVec4(0.78f, 0.17f, 0.20f, held ? 0.75f : 1.0f), h));
+        } else if (h > 0) {
+            dl->AddRectFilled(a, b, u32(held ? col::Line : col::Surface3, h));
+        }
+        ImU32 gc = u32(i == 2 ? mix(col::Dim, ImVec4(1, 1, 1, 1), h) : mix(col::Dim, col::Text, h));
+        float g = std::round(em * 0.68f);
+        ImVec2 c(std::round((a.x + b.x) * 0.5f), std::round((a.y + b.y) * 0.5f));
+        if (i == 0) {
+            dl->AddLine(ImVec2(c.x - g * 0.5f, c.y + 0.5f), ImVec2(c.x + g * 0.5f, c.y + 0.5f), gc, th);
+        } else if (i == 1) {
+            if (frame::maximized()) {
+                float o = std::round(g * 0.22f);
+                dl->AddRect(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f + o), ImVec2(c.x + g * 0.5f - o, c.y + g * 0.5f), gc, 1.5f, 0, th);
+                dl->PathLineTo(ImVec2(c.x - g * 0.5f + o, c.y - g * 0.5f + o));
+                dl->PathLineTo(ImVec2(c.x - g * 0.5f + o, c.y - g * 0.5f));
+                dl->PathLineTo(ImVec2(c.x + g * 0.5f, c.y - g * 0.5f));
+                dl->PathLineTo(ImVec2(c.x + g * 0.5f, c.y + g * 0.5f - o));
+                dl->PathLineTo(ImVec2(c.x + g * 0.5f - o, c.y + g * 0.5f - o));
+                dl->PathStroke(gc, 0, th);
+            } else {
+                dl->AddRect(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f), ImVec2(c.x + g * 0.5f, c.y + g * 0.5f), gc, 1.5f, 0, th);
+            }
+        } else {
+            dl->AddLine(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f), ImVec2(c.x + g * 0.5f, c.y + g * 0.5f), gc, th);
+            dl->AddLine(ImVec2(c.x + g * 0.5f, c.y - g * 0.5f), ImVec2(c.x - g * 0.5f, c.y + g * 0.5f), gc, th);
+        }
+        if (clicked) {
+            if (i == 0) frame::minimize();
+            else if (i == 1) frame::toggleMaximize();
+            else glfwSetWindowShouldClose(window, 1);
+        }
+    }
+    return right - bw * n;
+}
+
+// `text` cut to fit `maxW` in the current font, with "..." at the end, or in the middle (paths: keeps
+// the drive and the last folder).
+std::string fitText(const std::string& text, float maxW, bool middle = false) {
+    if (ImGui::CalcTextSize(text.c_str()).x <= maxW) return text;
+    auto back = [&](size_t i) {  // start of the UTF-8 character before i
+        do --i; while (i > 0 && (text[i] & 0xC0) == 0x80);
+        return i;
+    };
+    auto fwd = [&](size_t i) {
+        do ++i; while (i < text.size() && (text[i] & 0xC0) == 0x80);
+        return i;
+    };
+    if (!middle) {
+        size_t n = text.size();
+        while (n > 0) {
+            n = back(n);
+            std::string t = text.substr(0, n) + "...";
+            if (ImGui::CalcTextSize(t.c_str()).x <= maxW) return t;
+        }
+        return "...";
+    }
+    // drop characters around the middle until it fits
+    size_t a = text.size() / 2, b = a;
+    for (bool left = true; a > 0 || b < text.size(); left = !left) {
+        if ((left && a > 0) || b >= text.size()) a = back(a);
+        else b = fwd(b);
+        std::string t = text.substr(0, a) + "..." + text.substr(b);
+        if (ImGui::CalcTextSize(t.c_str()).x <= maxW) return t;
+    }
+    return "...";
+}
+
+// Icon tile in the style of dialogHeader(): rounded gradient square with the icon in its centre.
+void iconTile(Ico ic, const ImVec4& tint, float tile) {
+    const float e = emPx();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    gradientRect(dl, p, ImVec2(p.x + tile, p.y + tile), u32(tint, 0.30f), u32(mix(tint, col::Accent2, 0.5f), 0.14f), e * 0.7f);
+    dl->AddRect(p, ImVec2(p.x + tile, p.y + tile), u32(tint, 0.35f), e * 0.7f, 0, 1.0f);
+    float is = tile * 0.52f;
+    drawIco(dl, ic, ImVec2(p.x + (tile - is) * 0.5f, p.y + (tile - is) * 0.5f), is, u32(mix(tint, col::Text, 0.35f)));
+    ImGui::Dummy(ImVec2(tile, tile));
+}
+
 #ifdef __APPLE__
 const char* kMod = "Cmd";
 #else
@@ -204,6 +304,10 @@ void App::frame() {
     syncDropJob();
     updateBoost();
     dropTab_ = -1;  // set again by the archive view drawn this frame
+    if (quick_) {
+        drawQuick();
+        return;
+    }
     if (quitWhenDone_ && directJobs_ == 0 && !directFailed_) glfwSetWindowShouldClose(window_, 1);
     const float em = emPx();
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -320,6 +424,258 @@ void App::frame() {
         toast(col::Error, e);
     }
     drawToasts();
+}
+
+// ============================================================================ quick-task window
+// Explorer "Extract here" / "Add to .7z" ...: a small window with the task alone - what is being done,
+// progress, speed and time left, pause / cancel, a password prompt when one is needed, and how it ended.
+void App::drawQuickTitleBar() {
+    if (!ImGui::BeginMenuBar()) return;
+    const float em = emPx();
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+    ImRect mb = w->MenuBarRect();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    std::vector<frame::Rect> hit;
+    dl->AddLine(ImVec2(mb.Min.x, mb.Max.y - 1), ImVec2(mb.Max.x, mb.Max.y - 1), u32(col::Line));
+    float ls = em * 1.2f;
+    ImGui::SetCursorPosX(em * 1.0f);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    drawLogo(dl, ImVec2(p.x, (mb.Min.y + mb.Max.y - ls) * 0.5f), ls);
+    ImGui::Dummy(ImVec2(ls, 1));
+    ImGui::SameLine(0, em * 0.5f);
+    ImGui::PushFont(fonts().bold);
+    ImGui::TextUnformatted("Kompressor");
+    ImGui::PopFont();
+    if (frame::custom()) windowButtons(window_, mb.Max.x, w->Pos.y, mb.Max.y - w->Pos.y, false, hit);
+    frame::setTitleBar(mb.Max.y - w->Pos.y, hit);
+    ImGui::EndMenuBar();
+}
+
+void App::drawQuick() {
+    const float em = emPx();
+    const double now = ImGui::GetTime();
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->WorkPos);
+    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(em * 0.8f, em * 0.5f));
+    ImGui::Begin("##quick", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar(4);
+    drawQuickTitleBar();
+
+    const float pad = em * 1.1f;
+    const float W = ImGui::GetWindowWidth(), H = ImGui::GetWindowHeight();
+    const float inner = W - pad * 2;
+    const float tile = em * 2.7f;
+    const float bh = ImGui::GetFrameHeight() * 1.05f;
+    const float textX = pad + tile + em * 0.85f;
+    const float textW = W - textX - pad;
+    ImGui::SetCursorPos(ImVec2(pad, ImGui::GetCursorPosY() + em * 0.9f));
+    const float top = ImGui::GetCursorPosY();
+    // Header: icon tile, title, and one dim line under it.
+    auto header = [&](Ico ic, const ImVec4& tint, const std::string& title, const std::string& line) {
+        ImGui::SetCursorPos(ImVec2(pad, top));
+        iconTile(ic, tint, tile);
+        ImGui::SetCursorPos(ImVec2(textX, top - em * 0.1f));
+        ImGui::PushFont(fonts().h2);
+        ImGui::TextUnformatted(fitText(title, textW).c_str());
+        ImGui::PopFont();
+        if (!line.empty()) {
+            ImGui::SetCursorPosX(textX);
+            ImGui::TextColored(col::Dim, "%s", fitText(line, textW).c_str());
+        }
+        ImGui::SetCursorPos(ImVec2(pad, top + tile + em * 0.85f));
+    };
+    auto buttonRow = [&] { ImGui::SetCursorPos(ImVec2(pad, H - pad - bh)); };
+    // Puts `width` of buttons against the right padding (alignEnd() would run them to the window's edge).
+    auto alignEnd = [&](float width) { ImGui::SetCursorPosX(W - pad - width); };
+    auto openFull = [&] {
+        if (ghostButton("Open in Kompressor", Ico::Open, ImVec2(0, bh))) leaveQuickMode();
+        ImGui::SetItemTooltip("Show the full Kompressor window, with the activity log");
+    };
+
+    std::vector<Job*> act;
+    for (auto& jp : jobs_)
+        if (jp->direct && !jp->finished) act.push_back(jp.get());
+
+    bool quit = false;
+    if (pwd_.onOk) {
+        // ---------------------------------------------------------------- password
+        header(Ico::Lock, col::Warn, "Password needed", pwd_.prompt);
+        float ib = ImGui::GetFrameHeight();
+        if (pwd_.request) {
+            ImGui::SetKeyboardFocusHere();
+            pwd_.request = false;
+        }
+        ImGui::SetNextItemWidth(inner - ib - em * 0.4f);
+        bool enter = ImGui::InputTextWithHint("##qpw", "Password", pwd_.buf, sizeof pwd_.buf,
+                                              ImGuiInputTextFlags_EnterReturnsTrue | (pwd_.show ? 0 : ImGuiInputTextFlags_Password));
+        ImGui::SameLine(0, em * 0.4f);
+        const ImVec4 on = col::AccentHover;
+        if (iconButton("##qshow", Ico::Eye, ib, pwd_.show ? "Hide password" : "Show password", true, pwd_.show ? &on : nullptr))
+            pwd_.show = !pwd_.show;
+        buttonRow();
+        float pbw = em * 7.0f, cbw = em * 6.0f;
+        alignEnd(pbw + cbw + em * 0.5f);
+        bool cancel = secondaryButton("Cancel", ImVec2(cbw, bh)) || ImGui::IsKeyPressed(ImGuiKey_Escape);
+        ImGui::SameLine(0, em * 0.5f);
+        bool ok = primaryButton("Unlock", Ico::Lock, ImVec2(pbw, bh)) || enter;
+        if (ok || cancel) {
+            std::string pw = pwd_.buf;
+            std::memset(pwd_.buf, 0, sizeof pwd_.buf);
+            auto okCb = std::move(pwd_.onOk);
+            auto cancelCb = std::move(pwd_.onCancel);
+            pwd_.onOk = nullptr;
+            pwd_.onCancel = nullptr;
+            pwd_.request = false;
+            if (ok && okCb) okCb(pw);
+            else if (cancel && cancelCb) cancelCb();
+        }
+    } else if (!act.empty()) {
+        // ---------------------------------------------------------------- working
+        bool allPaused = true, det = true;
+        double done = 0, total = 0, rate = 0, left = 0, elapsed = 0;
+        int rated = 0;
+        for (Job* j : act) {
+            j->sampleRate(now);
+            if (!j->paused()) allPaused = false;
+            uint64_t t = j->prog->total.load();
+            if (t == 0) det = false;
+            total += (double)t;
+            done += (double)j->prog->fraction() * (double)t;
+            if (j->rateSamples >= 3) rate += j->rate, ++rated;
+            double l = j->secondsLeft();
+            left = (left < 0 || l < 0) ? -1.0 : std::max(left, l);
+            elapsed = std::max(elapsed, j->elapsed(now));
+        }
+        float frac = det && total > 0 ? (float)(done / total) : -1.0f;
+        std::string what, dest = act[0]->dest;
+        for (size_t i = 0; i < act.size() && i < 2; ++i) what += (i ? ", " : "") + act[i]->subject;
+        if (act.size() > 2) what += " and " + std::to_string(act.size() - 2) + " more";
+        for (Job* j : act)
+            if (j->dest != dest) dest = parentDir(dest);  // e.g. "Extract to folder" on several archives
+        if (quickVerb_ != "Extracting") dest = kz::fileNameOf(dest);  // the new archive sits beside its files
+        std::string arrow = "  ->  ";
+        std::string line = what + arrow + dest;
+        if (ImGui::CalcTextSize(line.c_str()).x > textW) {  // squeeze the path, not the names
+            float room = textW - ImGui::CalcTextSize((what + arrow).c_str()).x;
+            line = room > em * 6 ? what + arrow + fitText(dest, room, true) : what;
+        }
+        Ico ic = quickVerb_ == "Extracting" ? Ico::Extract : quickVerb_ == "Super-compressing" ? Ico::Sparkle : Ico::Box;
+        header(ic, allPaused ? col::Warn : col::Accent, allPaused ? "Paused" : quickVerb_, line);
+        progressBar(allPaused ? std::max(frac, 0.0f) : frac, ImVec2(inner, em * 0.42f), allPaused ? col::Warn : col::Accent);
+        ImGui::Dummy(ImVec2(0, em * 0.15f));
+        // 42%  -  12.3 MB/s  -  about 1m left                      0:12
+        std::string st;
+        if (frac >= 0) st = std::to_string((int)std::floor(frac * 100.0f)) + "%";
+        if (allPaused) {
+            st += st.empty() ? "Paused" : "  -  paused";
+        } else {
+            if (rated) st += (st.empty() ? "" : "  -  ") + (rate < 1024.0 ? std::string("under 1 KB/s") : kz::humanSize((uint64_t)rate) + "/s");
+            if (left >= 0 && rated) st += "  -  " + timeLeftText(left);
+            if (st.empty()) st = act[0]->prog->status();
+        }
+        ImGui::SetCursorPosX(pad);
+        std::string el = kz::formatDuration(elapsed);
+        float elW = ImGui::CalcTextSize(el.c_str()).x;
+        ImGui::TextColored(allPaused ? col::Warn : col::Dim, "%s", fitText(st, inner - elW - em).c_str());
+        ImGui::SameLine(pad + inner - elW);
+        ImGui::TextColored(col::Faint, "%s", el.c_str());
+
+        buttonRow();
+        openFull();
+        float pbw = em * 6.0f, cbw = em * 6.0f;
+        ImGui::SameLine();
+        alignEnd(pbw + cbw + em * 0.5f);
+        if (secondaryButton(allPaused ? "Resume" : "Pause", ImVec2(pbw, bh)))
+            for (Job* j : act) j->setPaused(!allPaused, now);
+        ImGui::SameLine(0, em * 0.5f);
+        if (secondaryButton("Cancel", ImVec2(cbw, bh)))
+            for (Job* j : act) {
+                j->prog->cancel = true;  // also wakes a paused worker so it can stop
+                j->setPaused(false, now);
+            }
+    } else if (directJobs_ == 0) {
+        // ---------------------------------------------------------------- finished
+        if (quickDoneAt_ < 0) quickDoneAt_ = now;
+        const QuickResult* failed = nullptr;
+        const QuickResult* last = nullptr;
+        int ok = 0;
+        for (auto& r : quickResults_) {
+            if (r.ok) ++ok, last = &r;
+            else if (!r.cancelled && !failed) failed = &r;
+        }
+        const bool extracting = quickVerb_ == "Extracting";
+        if (failed) {
+            header(Ico::Error, col::Error, (extracting ? "Couldn't extract " : "Couldn't create ") + failed->subject, "");
+            // The reason, wrapped over the lines left above the buttons.
+            ImGui::SetCursorPos(ImVec2(textX, top + ImGui::GetTextLineHeightWithSpacing() * 1.35f));
+            ImGui::PushTextWrapPos(W - pad);
+            ImGui::PushStyleColor(ImGuiCol_Text, mix(col::Error, col::Text, 0.55f));
+            std::string msg = failed->message.empty() ? std::string("Something went wrong.") : failed->message;
+            if (ok) msg += "  (" + std::to_string(ok) + " other" + (ok > 1 ? "s" : "") + " finished.)";
+            ImGui::TextWrapped("%s", msg.c_str());
+            ImGui::PopStyleColor();
+            ImGui::PopTextWrapPos();
+            buttonRow();
+            openFull();
+            float sbw = em * 8.6f, cbw = em * 5.4f;
+            ImGui::SameLine();
+            alignEnd(sbw + cbw + em * 0.5f);
+            if (secondaryButton("Show in folder", ImVec2(sbw, bh))) reveal(failed->reveal);
+            ImGui::SameLine(0, em * 0.5f);
+            if (primaryButton("Close", Ico::Close, ImVec2(cbw, bh), false) || ImGui::IsKeyPressed(ImGuiKey_Escape)) quit = true;
+        } else if (!last) {
+            quit = true;  // everything was cancelled
+        } else {
+            std::string verb = extracting ? "Extracted " : "Created ";
+            std::string title = ok > 1 ? verb + std::to_string(ok) + " archives" : verb + last->subject;
+            std::string line = extracting ? "to " + fitText(last->reveal, textW - ImGui::CalcTextSize("to ").x, true) : last->message;
+            header(Ico::Check, col::Ok, title, line);
+            progressBar(1.0f, ImVec2(inner, em * 0.42f), col::Ok);
+            buttonRow();
+            float sbw = em * 8.6f, cbw = em * 5.4f;
+            alignEnd(sbw + cbw + em * 0.5f);
+            if (secondaryButton("Show in folder", ImVec2(sbw, bh))) {
+                reveal(last->reveal);
+                quit = true;
+            }
+            ImGui::SameLine(0, em * 0.5f);
+            if (primaryButton("Close", Ico::Close, ImVec2(cbw, bh), false)) quit = true;
+            // Closes on its own a moment later, unless the pointer rests on the window (to click a button).
+            if (glfwGetWindowAttrib(window_, GLFW_HOVERED)) quickDoneAt_ = std::max(quickDoneAt_, now - 0.6);
+            if (now - quickDoneAt_ > 1.6) quit = true;
+        }
+    }
+    if (quit) glfwSetWindowShouldClose(window_, 1);
+    ImGui::End();
+    if (frame::custom())
+        ImGui::GetForegroundDrawList()->AddRect(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
+                                                u32(mix(col::Line, col::Faint, 0.3f)));
+}
+
+void App::leaveQuickMode() {
+    quick_ = false;
+    quitWhenDone_ = false;  // the user wants to look around: stay open
+    float xs = 1.0f, ys = 1.0f;
+#ifndef __APPLE__
+    glfwGetWindowContentScale(window_, &xs, &ys);  // window sizes are in pixels here
+#endif
+    glfwSetWindowTitle(window_, "Kompressor");
+    glfwSetWindowAttrib(window_, GLFW_RESIZABLE, GLFW_TRUE);
+    glfwSetWindowSizeLimits(window_, 760, 480, GLFW_DONT_CARE, GLFW_DONT_CARE);
+    frame::placeCentered((int)std::lround(1320 * xs), (int)std::lround(840 * xs));
+}
+
+void App::enterQuickMode(const std::string& verb) {
+    quick_ = true;
+    quickVerb_ = verb;
+    glfwSetWindowTitle(window_, (verb + " - Kompressor").c_str());
 }
 
 void App::drawSplitOption(bool* on, int* preset, int* customMb, float inner) {
@@ -452,54 +808,7 @@ void App::drawMenuBar() {
 
     // right side: window controls (custom title bar) and version
     float right = mb.Max.x;
-    if (frame::custom()) {
-        float bw = std::round(em * 3.1f), top = w->Pos.y, bh = mb.Max.y - top;
-        float th = std::max(1.0f, std::round(em / 15.0f));
-        for (int i = 0; i < 3; ++i) {
-            float x = right - bw * (3 - i);
-            ImGui::SetCursorScreenPos(ImVec2(x, top));
-            ImGui::PushID(i);
-            bool clicked = ImGui::InvisibleButton("##wbtn", ImVec2(bw, bh));
-            bool hov = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
-            float h = anim(ImGui::GetItemID(), hov, 20.0f);
-            ImGui::PopID();
-            addHit();
-            ImVec2 a(x, top), b(x + bw, top + bh);
-            if (i == 2) {
-                if (h > 0) dl->AddRectFilled(a, b, u32(ImVec4(0.78f, 0.17f, 0.20f, held ? 0.75f : 1.0f), h));
-            } else if (h > 0) {
-                dl->AddRectFilled(a, b, u32(held ? col::Line : col::Surface3, h));
-            }
-            ImU32 gc = u32(i == 2 ? mix(col::Dim, ImVec4(1, 1, 1, 1), h) : mix(col::Dim, col::Text, h));
-            float g = std::round(em * 0.68f);
-            ImVec2 c(std::round((a.x + b.x) * 0.5f), std::round((a.y + b.y) * 0.5f));
-            if (i == 0) {
-                dl->AddLine(ImVec2(c.x - g * 0.5f, c.y + 0.5f), ImVec2(c.x + g * 0.5f, c.y + 0.5f), gc, th);
-            } else if (i == 1) {
-                if (frame::maximized()) {
-                    float o = std::round(g * 0.22f);
-                    dl->AddRect(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f + o), ImVec2(c.x + g * 0.5f - o, c.y + g * 0.5f), gc, 1.5f, 0, th);
-                    dl->PathLineTo(ImVec2(c.x - g * 0.5f + o, c.y - g * 0.5f + o));
-                    dl->PathLineTo(ImVec2(c.x - g * 0.5f + o, c.y - g * 0.5f));
-                    dl->PathLineTo(ImVec2(c.x + g * 0.5f, c.y - g * 0.5f));
-                    dl->PathLineTo(ImVec2(c.x + g * 0.5f, c.y + g * 0.5f - o));
-                    dl->PathLineTo(ImVec2(c.x + g * 0.5f - o, c.y + g * 0.5f - o));
-                    dl->PathStroke(gc, 0, th);
-                } else {
-                    dl->AddRect(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f), ImVec2(c.x + g * 0.5f, c.y + g * 0.5f), gc, 1.5f, 0, th);
-                }
-            } else {
-                dl->AddLine(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f), ImVec2(c.x + g * 0.5f, c.y + g * 0.5f), gc, th);
-                dl->AddLine(ImVec2(c.x + g * 0.5f, c.y - g * 0.5f), ImVec2(c.x - g * 0.5f, c.y + g * 0.5f), gc, th);
-            }
-            if (clicked) {
-                if (i == 0) frame::minimize();
-                else if (i == 1) frame::toggleMaximize();
-                else glfwSetWindowShouldClose(window_, 1);
-            }
-        }
-        right -= bw * 3 + em * 0.4f;
-    }
+    if (frame::custom()) right = windowButtons(window_, right, w->Pos.y, mb.Max.y - w->Pos.y, true, hit) - em * 0.4f;
     char ver[32];
     std::snprintf(ver, sizeof ver, "v%s", KZ_VERSION);
     ImGui::PushFont(fonts().caption);
@@ -2451,12 +2760,16 @@ void App::drawPasswordPopup() {
             std::memset(pwd_.buf, 0, sizeof pwd_.buf);
             auto cb = std::move(pwd_.onOk);
             pwd_.onOk = nullptr;
+            pwd_.onCancel = nullptr;
             ImGui::CloseCurrentPopup();
             if (cb) cb(pw);
         } else if (cancel) {
             std::memset(pwd_.buf, 0, sizeof pwd_.buf);
             pwd_.onOk = nullptr;
+            auto cb = std::move(pwd_.onCancel);
+            pwd_.onCancel = nullptr;
             ImGui::CloseCurrentPopup();
+            if (cb) cb();
         }
         ImGui::EndPopup();
     }

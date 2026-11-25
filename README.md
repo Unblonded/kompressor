@@ -85,7 +85,7 @@ It writes `build/windows/installer/KompressorSetup-<version>.exe`. The installer
 - can add a desktop shortcut and put `kompressor-cli` on `PATH` (both off by default)
 - registers an uninstaller in Apps & Features
 
-The right-click menu can also be switched on or off later in the app's **Settings** (gear button, or Ctrl+,).
+The right-click menu can also be switched on or off later in the app's **Settings** (gear button, or Ctrl+,). Its one-step entries ("Extract here", "Extract to folder", "Add to .7z / .zip / .kmp") run in a small window that shows only the task's progress (with Pause, Cancel and "Open in Kompressor") and closes itself when the task succeeds.
 
 ### Linux (Debian/Ubuntu)
 ```bash

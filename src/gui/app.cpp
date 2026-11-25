@@ -258,13 +258,18 @@ void App::log(const ImVec4& c, const std::string& text, const std::string& open,
     if (log_.size() > 500) log_.erase(log_.begin());
 }
 
-void App::toast(const ImVec4& c, const std::string& text) { toasts_.push_back({ImGui::GetTime(), c, text}); }
+void App::toast(const ImVec4& c, const std::string& text) {
+    if (quick_) return;  // the quick-task window shows the outcome itself
+    toasts_.push_back({ImGui::GetTime(), c, text});
+}
 
-void App::askPassword(const std::string& prompt, std::function<void(const std::string&)> onOk) {
+void App::askPassword(const std::string& prompt, std::function<void(const std::string&)> onOk,
+                      std::function<void()> onCancel) {
     pwd_.request = true;
     pwd_.prompt = prompt;
     pwd_.buf[0] = 0;
     pwd_.onOk = std::move(onOk);
+    pwd_.onCancel = std::move(onCancel);
 }
 
 // ============================================================================ tabs
@@ -699,7 +704,7 @@ void App::extractFile(const std::string& path, const std::string& destDir, const
     o.destDir = destDir;
     o.password = password;
     ++directJobs_;
-    startJob("Extracting " + title,
+    Job& job = startJob("Extracting " + title,
         [src, o](kz::Progress& p, std::string& err) { return kz::extractArchive(src, o, p, err); },
         [this, path, o, title](Job& j) {
             --directJobs_;
@@ -707,6 +712,7 @@ void App::extractFile(const std::string& path, const std::string& destDir, const
             if (j.ok) {
                 log(col::Ok, "Extracted " + title + " to " + o.destDir, "", o.destDir);
                 toast(col::Ok, "Extracted " + title);
+                quickResult(true, false, title, "", o.destDir);
             } else if (j.prog->needPassword) {
                 ++directJobs_;  // still pending until the password prompt is answered
                 askPassword(o.password.empty() ? "\"" + title + "\" is encrypted. Enter its password:"
@@ -714,13 +720,36 @@ void App::extractFile(const std::string& path, const std::string& destDir, const
                             [this, path, o](const std::string& pw) {
                                 --directJobs_;
                                 extractFile(path, o.destDir, pw);
+                            },
+                            [this, title, path] {
+                                --directJobs_;
+                                log(col::Dim, "Extraction cancelled (" + title + ")");
+                                quickResult(false, true, title, "Cancelled", path);
                             });
+            } else if (quick_ && j.prog->cancel) {  // cancelled from the quick-task window: not a failure
+                log(col::Dim, "Extraction cancelled (" + title + ")");
+                quickResult(false, true, title, "Cancelled", path);
             } else {
                 directFailed_ = true;
                 log(col::Error, "Extract failed (" + title + "): " + j.message, "", o.destDir);
                 toast(col::Error, "Extraction failed: " + j.message);
+                quickResult(false, false, title, j.message, path);
             }
         });
+    job.direct = true;
+    job.subject = title;
+    job.dest = destDir;
+}
+
+void App::quickResult(bool ok, bool cancelled, const std::string& subject, const std::string& message,
+                      const std::string& revealPath) {
+    QuickResult r;
+    r.ok = ok;
+    r.cancelled = cancelled;
+    r.subject = subject;
+    r.message = message;
+    r.reveal = revealPath;
+    quickResults_.push_back(std::move(r));
 }
 
 // Name for the quick "Add to" entries; KompShell.dll's addStem() labels the menu with the same rule.
@@ -758,20 +787,33 @@ void App::quickCompress(const std::vector<std::string>& inputs, kz::OutFormat fo
     std::string outStr = kz::pathToUtf8(out);
     auto res = std::make_shared<kz::CompressResult>();
     ++directJobs_;
-    startJob(std::string(format == kz::OutFormat::Kmp ? "Super-compressing " : "Compressing ") + kz::fileNameOf(outStr),
+    std::string name = kz::fileNameOf(outStr);
+    Job& job = startJob(std::string(format == kz::OutFormat::Kmp ? "Super-compressing " : "Compressing ") + name,
         [inputs, outStr, o, res](kz::Progress& p, std::string& err) { return kz::createArchive(inputs, outStr, o, p, *res, err); },
-        [this, res, outStr](Job& j) {
+        [this, res, outStr, name, inputs](Job& j) {
             --directJobs_;
             for (auto& w : j.prog->warnings()) log(col::Warn, w);
             if (j.ok) {
-                log(col::Ok, "Created " + kz::fileNameOf(outStr) + ": " + res->summary, outStr, outStr);
-                toast(col::Ok, "Created " + kz::fileNameOf(outStr) + " - " + kz::humanSize(res->outputBytes));
+                log(col::Ok, "Created " + name + ": " + res->summary, outStr, outStr);
+                toast(col::Ok, "Created " + name + " - " + kz::humanSize(res->outputBytes));
+                quickResult(true, false, name, res->summary, outStr);
+            } else if (quick_ && j.prog->cancel) {  // cancelled from the quick-task window: not a failure
+                log(col::Dim, "Compression cancelled (" + name + ")");
+                quickResult(false, true, name, "Cancelled", inputs[0]);
             } else {
                 directFailed_ = true;  // keep the window open so the error can be read
                 log(col::Error, "Compression failed: " + j.message);
                 toast(col::Error, "Compression failed: " + j.message);
+                quickResult(false, false, name, j.message, inputs[0]);
             }
         });
+    job.direct = true;
+    // What goes in: one name, or "a.txt, b.txt and 3 more".
+    std::string what = kz::fileNameOf(inputs[0]);
+    if (inputs.size() == 2) what += ", " + kz::fileNameOf(inputs[1]);
+    else if (inputs.size() > 2) what += " and " + std::to_string(inputs.size() - 1) + " more";
+    job.subject = what;
+    job.dest = outStr;
 }
 
 void App::openExtractDialog(const std::string& path) {

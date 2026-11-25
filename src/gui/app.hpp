@@ -40,6 +40,10 @@ struct Job {
     double started = 0.0;
     bool visible = true;  // listed in the activity panel
     bool controls = true;  // with pause and cancel buttons
+    // extractFile() / quickCompress() jobs, which the quick-task window shows: the file(s) worked on
+    // and where the result goes.
+    bool direct = false;
+    std::string subject, dest;
     // Pausing (the flag the worker waits on is prog->paused). Elapsed time leaves paused stretches out.
     double pausedSince = 0.0, pausedTotal = 0.0;
     bool paused() const { return prog->paused.load(); }
@@ -159,6 +163,10 @@ public:
     void testArchiveFile(const std::string& path);
     // Close the window once every extractFile() / quickCompress() job has succeeded (Explorer menu launches).
     void quitWhenDone() { quitWhenDone_ = true; }
+    // Explorer menu launches that need no dialog: a small window with only the task's progress in place
+    // of the full app (the window is already sized for it). `verb` heads it ("Extracting", "Compressing").
+    void enterQuickMode(const std::string& verb);
+    bool quickMode() const { return quick_; }
     void showSettings() { showSettings_ = true; }
     // Debug aid: place the Settings dialog beside the main window (tests detached viewports).
     void debugDetach() { debugDetach_ = true; }
@@ -261,7 +269,8 @@ private:
     // Opens the tab's archive in Windows File Explorer, or shows it there when Explorer can't browse it.
     void openInExplorer(ExplorerTab& t);
     void actionConvert(ExplorerTab& t, bool super = false);  // recompress into another format
-    void askPassword(const std::string& prompt, std::function<void(const std::string&)> onOk);
+    void askPassword(const std::string& prompt, std::function<void(const std::string&)> onOk,
+                     std::function<void()> onCancel = nullptr);
     void runExtract(int tabId, kz::ExtractOptions o, bool reveal);
     void runTest(int tabId);
     void runConvert(int tabId, std::string out, kz::CompressOptions o, bool openWhenDone);
@@ -297,6 +306,21 @@ private:
     void updateBoost();
     int directJobs_ = 0;  // extractFile() / quickCompress() jobs still running or waiting for a password
     bool directFailed_ = false, quitWhenDone_ = false;
+
+    // Quick-task window (Explorer "Extract here", "Add to .7z" ...): drawQuick() replaces the whole frame.
+    struct QuickResult {
+        bool ok = false, cancelled = false;
+        std::string subject, message, reveal;
+    };
+    bool quick_ = false;
+    std::string quickVerb_;
+    std::vector<QuickResult> quickResults_;  // one per finished task
+    double quickDoneAt_ = -1.0;  // when the last task finished (the window closes shortly after)
+    void quickResult(bool ok, bool cancelled, const std::string& subject, const std::string& message,
+                     const std::string& reveal);
+    void drawQuick();
+    void drawQuickTitleBar();
+    void leaveQuickMode();  // "Open in Kompressor": grow into the full window
 
     struct CompressState {
         bool open = false, focus = false;
@@ -431,6 +455,7 @@ private:
         char buf[256] = {};
         bool show = false;
         std::function<void(const std::string&)> onOk;
+        std::function<void()> onCancel;
     } pwd_;
 };
 

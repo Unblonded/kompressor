@@ -169,9 +169,11 @@ int main(int argc, char** argv) {
         }
     // "--snapshot-size 1320x1400": a different window size, to check layouts that need more room.
     int winW = 1320, winH = 840;
+    bool sizeGiven = false;
     for (size_t i = 1; i + 1 < args.size(); ++i)
         if (args[i] == "--snapshot-size") {
             std::sscanf(args[i + 1].c_str(), "%dx%d", &winW, &winH);
+            sizeGiven = true;
             args.erase(args.begin() + i, args.begin() + i + 2);
             break;
         }
@@ -261,6 +263,19 @@ int main(int argc, char** argv) {
 #endif
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
 
+    // Explorer menu tasks that need no dialog run in a small window of their own, not the full app.
+    std::string quickVerb;
+    if (shellAction == "extract-here" || shellAction == "extract-to") quickVerb = "Extracting";
+    else if (shellAction == "add-7z" || shellAction == "add-zip") quickVerb = "Compressing";
+    else if (shellAction == "add-kmp") quickVerb = "Super-compressing";
+    if (shellPaths.empty()) quickVerb.clear();
+    const bool quick = !quickVerb.empty();
+    if (quick) {
+        if (!sizeGiven) winW = 460, winH = 200;
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);  // shown once placed
+    }
+
     GLFWwindow* window = glfwCreateWindow(winW, winH, "Kompressor", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
@@ -275,9 +290,17 @@ int main(int argc, char** argv) {
 #else
     glfwSwapInterval(1);
 #endif
-    glfwSetWindowSizeLimits(window, 760, 480, GLFW_DONT_CARE, GLFW_DONT_CARE);
+    if (!quick) glfwSetWindowSizeLimits(window, 760, 480, GLFW_DONT_CARE, GLFW_DONT_CARE);
     kzgui::setWindowIcon(window);
     kzgui::frame::install(window);  // custom title bar (Windows)
+    if (quick) {
+        float sx = 1.0f, sy = 1.0f;
+#ifndef __APPLE__
+        glfwGetWindowContentScale(window, &sx, &sy);  // window sizes are in pixels here
+#endif
+        kzgui::frame::placeCentered((int)std::lround(winW * sx), (int)std::lround(winH * sx));
+        glfwShowWindow(window);
+    }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -341,6 +364,7 @@ int main(int argc, char** argv) {
 
         if (!shellPaths.empty()) {
             namespace fs = std::filesystem;
+            if (quick) app.enterQuickMode(quickVerb);
             if (shellAction == "compress" || shellAction == "super") {
                 app.openCompressDialog(shellPaths, shellAction == "super");
             } else if (shellAction == "open") {
