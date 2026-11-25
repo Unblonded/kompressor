@@ -3,6 +3,7 @@
 #include "native_files.hpp"
 
 #include <GLFW/glfw3.h>
+#include <imgui.h>
 
 #ifdef _WIN32
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -27,6 +28,25 @@ constexpr UINT_PTR kRedrawTimer = 0x4B5A;
 int resizeBorder(HWND h) {
     UINT dpi = GetDpiForWindow(h);
     return GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+// Which resize edge a client-area point is on (HTLEFT ... HTBOTTOMRIGHT), or 0.
+LRESULT edgeAt(HWND h, POINT pt) {
+    if (IsZoomed(h) || !(GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) return 0;
+    RECT rc;
+    GetClientRect(h, &rc);
+    if (pt.x < rc.left || pt.x >= rc.right || pt.y < rc.top || pt.y >= rc.bottom) return 0;
+    int b = resizeBorder(h);
+    bool L = pt.x < b, R = pt.x >= rc.right - b, T = pt.y < b, B = pt.y >= rc.bottom - b;
+    if (T && L) return HTTOPLEFT;
+    if (T && R) return HTTOPRIGHT;
+    if (B && L) return HTBOTTOMLEFT;
+    if (B && R) return HTBOTTOMRIGHT;
+    if (L) return HTLEFT;
+    if (R) return HTRIGHT;
+    if (T) return HTTOP;
+    if (B) return HTBOTTOM;
+    return 0;
 }
 
 LRESULT CALLBACK frameProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -54,20 +74,7 @@ LRESULT CALLBACK frameProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_NCHITTEST: {
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(h, &pt);
-            RECT rc;
-            GetClientRect(h, &rc);
-            if (!IsZoomed(h) && (GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) {  // resizable
-                int b = resizeBorder(h);
-                bool L = pt.x < b, R = pt.x >= rc.right - b, T = pt.y < b, B = pt.y >= rc.bottom - b;
-                if (T && L) return HTTOPLEFT;
-                if (T && R) return HTTOPRIGHT;
-                if (B && L) return HTBOTTOMLEFT;
-                if (B && R) return HTBOTTOMRIGHT;
-                if (L) return HTLEFT;
-                if (R) return HTRIGHT;
-                if (T) return HTTOP;
-                if (B) return HTBOTTOM;
-            }
+            if (LRESULT edge = edgeAt(h, pt)) return edge;
             if (pt.y >= 0 && pt.y < (LONG)g_titleH) {
                 for (const Rect& r : g_interactive)
                     if (pt.x >= r.x0 && pt.x < r.x1 && pt.y >= r.y0 && pt.y < r.y1) return HTCLIENT;
@@ -166,6 +173,30 @@ void placeCentered(int w, int h) {
 void setTitleBar(float height, const std::vector<Rect>& interactive) {
     g_titleH = height;
     g_interactive = interactive;
+}
+
+void edgeCursor() {
+#ifdef _WIN32
+    // The resize border lies inside the client area, so GLFW counts it as "in the window" and puts
+    // ImGui's cursor (an arrow) back on every frame, hiding Windows' resize arrows. Ask ImGui for them.
+    if (!g_custom || !g_window) return;
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsAnyItemActive()) return;
+    HWND h = glfwGetWin32Window(g_window);
+    POINT pt;
+    if (!GetCursorPos(&pt) || WindowFromPoint(pt) != h) return;
+    ScreenToClient(h, &pt);
+    switch (edgeAt(h, pt)) {
+        case HTLEFT:
+        case HTRIGHT: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW); break;
+        case HTTOP:
+        case HTBOTTOM: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS); break;
+        case HTTOPLEFT:
+        case HTBOTTOMRIGHT: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE); break;
+        case HTTOPRIGHT:
+        case HTBOTTOMLEFT: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNESW); break;
+        default: break;
+    }
+#endif
 }
 
 void styleDetached(void* nativeHandle) {

@@ -650,6 +650,7 @@ int runWindow(bool broken, const std::wstring& password) {
         ImGui::NewFrame();
         beginFrameUi();
         drawUi();
+        frame::edgeCursor();
         ImGui::Render();
         int fw, fh;
         glfwGetFramebufferSize(window, &fw, &fh);

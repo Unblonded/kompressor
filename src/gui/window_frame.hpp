@@ -25,6 +25,8 @@ void placeCentered(int w, int h);
 // Called every frame: the title bar spans [0, height) vertically; points inside `interactive`
 // (menus, buttons) are normal client clicks, everything else in the bar drags the window.
 void setTitleBar(float height, const std::vector<Rect>& interactive);
+// Called at the end of every frame, before ImGui::Render: shows the resize arrows over the window's edges.
+void edgeCursor();
 // Styles a dialog that was dragged out of the main window into its own OS window (native handle):
 // dark frame, rounded corners and shadow, and owned by the main window so it stays in front of it.
 void styleDetached(void* nativeHandle);

@@ -414,6 +414,7 @@ int main(int argc, char** argv) {
             kzgui::beginFrameUi();
             kzgui::smoothScroll();
             app.frame();
+            kzgui::frame::edgeCursor();
             ImGui::Render();
             int w, h;
             glfwGetFramebufferSize(window, &w, &h);
