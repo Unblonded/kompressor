@@ -13,6 +13,7 @@
 
 #include "kmp.hpp"
 #include "kz_7z.hpp"
+#include "kz_zipx.hpp"
 #include "kz_native.hpp"
 #include "kz_sniff.hpp"
 
@@ -597,11 +598,13 @@ bool nativeTest(const native::Container& c, const Source& src, Progress& prog, s
     return true;
 }
 
-// 7z archives libarchive can't decrypt are read by kz_7z. 0: not one; 1: opened into `c`; -1: failed
-// (err says why; a missing or wrong password also sets prog.needPassword).
+// Archives libarchive can't decode, read by Kompressor's own readers: password-protected 7z (kz_7z) and
+// ZIPs with Deflate64 entries (kz_zipx). 0: not one; 1: opened into `c`; -1: failed (err says why; a
+// missing or wrong password also sets prog.needPassword).
 int open7z(const Source& src, const std::string& password, bool reading, native::Container& c, bool& encrypted,
            Progress& prog, std::string& err) {
     encrypted = false;
+    if (zipx::handles(src)) return zipx::open(src, c, err) ? 1 : -1;
     if (!sevenzip::handles(src)) return 0;
     bool needPw = false;
     if (sevenzip::open(src, password, reading, c, encrypted, needPw, err)) return 1;
