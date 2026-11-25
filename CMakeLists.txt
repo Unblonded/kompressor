@@ -5,7 +5,13 @@ if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
   set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 endif()
 
-project(Kompressor VERSION 2.1.0 LANGUAGES C CXX)
+# macOS: dragging files out and the file pasteboard are Objective-C++ (AppKit). The language has to be
+# known from the start, not enabled later, or CMake's generator misses its rules.
+set(KZ_LANGUAGES C CXX)
+if(CMAKE_HOST_APPLE)
+  list(APPEND KZ_LANGUAGES OBJCXX)
+endif()
+project(Kompressor VERSION 2.1.0 LANGUAGES ${KZ_LANGUAGES})
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -79,6 +85,7 @@ add_library(kompressor_core STATIC
   src/core/kz_search.cpp
   src/core/kz_ramdrive.cpp
   src/core/kz_sfx.cpp
+  src/core/kz_crypto.cpp
   src/core/kz_writer.cpp
   src/core/kmp.cpp
   src/core/kz_parallel.cpp
@@ -244,7 +251,6 @@ if(KOMPRESSOR_BUILD_GUI)
 
   if(APPLE)
     # Dragging files out and the file pasteboard use AppKit (Objective-C++).
-    enable_language(OBJCXX)
     list(APPEND KZ_GUI_SOURCES src/gui/native_files_mac.mm)
     set_source_files_properties(src/gui/native_files_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     add_executable(Kompressor MACOSX_BUNDLE ${KZ_GUI_SOURCES})

@@ -399,7 +399,7 @@ fs::path home() {
 }
 
 // Text safe inside double quotes in sh and in .desktop Exec lines.
-std::string quoted(const std::string& s) {
+std::string shQuote(const std::string& s) {
     std::string o = "\"";
     for (char c : s) {
         if (c == '"' || c == '\\' || c == '$' || c == '`') o += '\\';
@@ -463,7 +463,7 @@ bool writeWorkflow(const Item& it, const std::string& exe) {
         "<key>NSSendFileTypes</key><array>" + types + "</array>\n"
         "</dict></array>\n"
         "</dict></plist>\n";
-    std::string command = "exec " + quoted(exe) + " --shell " + it.action + " \"$@\"";
+    std::string command = "exec " + shQuote(exe) + " --shell " + it.action + " \"$@\"";
     std::string wflow =
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
@@ -554,7 +554,7 @@ std::string dolphinMenu(const std::string& exe, bool archives) {
         std::string id = it.action;
         id.erase(std::remove(id.begin(), id.end(), '-'), id.end());
         actions += id + ";";
-        body += "\n[Desktop Action " + id + "]\nName=" + it.label + "\nIcon=package-x-generic\nExec=" + quoted(exe) +
+        body += "\n[Desktop Action " + id + "]\nName=" + it.label + "\nIcon=package-x-generic\nExec=" + shQuote(exe) +
                 " --shell " + it.action + " %F\n";
     }
     return std::string("[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\n") +
@@ -573,11 +573,11 @@ bool registered() {
     std::string exe = selfExe();
 #ifdef __APPLE__
     std::string w = readFile(workflowPath(kItems[0]) / "Contents" / "document.wflow");
-    return !w.empty() && w.find(xmlEsc(quoted(exe))) != std::string::npos;
+    return !w.empty() && w.find(xmlEsc(shQuote(exe))) != std::string::npos;
 #else
     std::string sc = readFile(nautilusDir() / kItems[0].label);
     std::string d = readFile(dolphinFiles()[0]);
-    return sc.find(quoted(exe)) != std::string::npos && d.find(quoted(exe)) != std::string::npos;
+    return sc.find(shQuote(exe)) != std::string::npos && d.find(shQuote(exe)) != std::string::npos;
 #endif
 }
 
@@ -611,7 +611,7 @@ bool registerMenu(std::string& err) {
     // Nautilus (GNOME Files): Scripts > Kompressor > ...
     for (const Item& it : kItems)
         ok = ok && writeFile(nautilusDir() / it.label,
-                             std::string("#!/bin/sh\n") + kMarker + "\nexec " + quoted(exe) + " --shell " + it.action + " \"$@\"\n", true);
+                             std::string("#!/bin/sh\n") + kMarker + "\nexec " + shQuote(exe) + " --shell " + it.action + " \"$@\"\n", true);
     // Dolphin (KDE): a Kompressor submenu; archives get a second file with their own entries.
     for (auto& f : dolphinFiles()) {
         ok = ok && writeFile(f, dolphinMenu(exe, false), true);
@@ -620,7 +620,7 @@ bool registerMenu(std::string& err) {
     // Nemo (Cinnamon)
     for (const Item& it : kItems)
         ok = ok && writeFile(nemoDir() / (std::string("kompressor-") + it.action + ".nemo_action"),
-                             std::string("[Nemo Action]\nName=Kompressor: ") + it.label + "\nExec=" + quoted(exe) + " --shell " +
+                             std::string("[Nemo Action]\nName=Kompressor: ") + it.label + "\nExec=" + shQuote(exe) + " --shell " +
                                  it.action + " %F\nIcon-Name=package-x-generic\nSelection=notnone\n" +
                                  (it.archivesOnly ? std::string("Mimetypes=") + kArchiveMimes + "\n" : "Extensions=any;\n"),
                              false);
