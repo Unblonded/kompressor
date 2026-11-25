@@ -393,7 +393,7 @@ namespace {
 // 55 AA too); formats only known by their extension last.
 const Handler* const kHandlers[] = {
     &hVhdx, &hVhd, &hVdi, &hVmdk, &hQcow, &hSparse, &hDmg, &hLp,  //
-    &hCfb, &hChm, &hWim, &hArj, &hMslz, &hSwf, &hFlv, &hPpmd, &hUefi,  //
+    &hXar, &hCfb, &hChm, &hWim, &hArj, &hMslz, &hSwf, &hFlv, &hPpmd, &hUefi,  //
     &hNsis, &hPe, &hTe, &hElf, &hMachO, &hMub,  //
     &hSquash, &hCramfs, &hApfs, &hHfs, &hUdf, &hExt, &hNtfs, &hExfat, &hFat, &hLvm,  //
     &hGpt, &hApm, &hMbr,  //

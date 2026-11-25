@@ -456,7 +456,7 @@ bool kmpTest(const Source& src, Progress& prog, std::string& err) {
         std::string ferr;
         if (!r.readFile(i, [&](const uint8_t*, size_t n) { prog.done += n; return true; }, &prog, ferr)) {
             if (prog.cancelled()) { err = "Cancelled"; return false; }
-            prog.warn(ferr);
+            prog.warn(e.path + ": " + ferr);
             ++bad;
         }
     }
@@ -581,7 +581,7 @@ bool nativeTest(const native::Container& c, const Source& src, Progress& prog, s
         prog.setStatus(it.path);
         std::string ferr;
         if (!native::readItem(src, it, [&](const uint8_t*, size_t n) { prog.done += n; return !prog.cancelled(); }, ferr)) {
-            prog.warn(ferr);
+            prog.warn(it.path + ": " + ferr);
             ++bad;
         }
         if (prog.cancelled()) {

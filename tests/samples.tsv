@@ -1,0 +1,98 @@
+# What each regression sample must hold (tab separated): its name in the samples folder, then
+#   all       every corpus file, at its corpus path ("all -dir/" leaves out the files under dir/)
+#   a|b>c     just these corpus files ("from>as" when the archive names it differently)
+#   baseline  whatever tests/baselines/<name>.sha256 says (no independent reference exists)
+# Names containing "-pw" are encrypted with the password kz-test.
+#
+# Python's zipfile / tarfile / gzip / bz2 / lzma
+py-stored.zip	all
+py-deflate.zip	all
+py-bzip2.zip	all
+py-lzma.zip	all
+py.tar	all
+py.tar.gz	all
+py.tar.bz2	all
+py.tar.xz	all
+log.txt.gz	data/log.txt
+log.txt.bz2	data/log.txt
+log.txt.xz	data/log.txt
+log.txt.lzma	data/log.txt
+# Built by hand in gen/mkpy.py
+readme.tx_	readme.txt
+app.b64	baseline
+fw.hex	baseline
+movie-zlib.swf	baseline
+movie-lzma.swf	baseline
+# .NET ZipFile
+dotnet.zip	all
+# Windows' tar (bsdtar), which crashes on the corpus's Unicode names, so is given everything else
+wtar.zip	all -unicode/
+wtar-store.zip	all -unicode/
+wtar-pw.zip	all -unicode/
+wtar-zipcrypto-pw.zip	all -unicode/
+wtar.7z	all -unicode/
+wtar-lzma1.7z	all -unicode/
+wtar-bzip2.7z	all -unicode/
+wtar-deflate.7z	all -unicode/
+wtar-ppmd.7z	all -unicode/
+wtar-store.7z	all -unicode/
+wtar.cpio	all -unicode/
+wtar-odc.cpio	all -unicode/
+wtar.iso	all -unicode/
+wtar.xar	all -unicode/
+wtar-bzip2.xar	all -unicode/
+wtar-xz.xar	all -unicode/
+wtar-lzma.xar	all -unicode/
+wtar-none-md5.xar	all -unicode/
+wtar-gnu.tar	all -unicode/
+wtar.tar.gz	all -unicode/
+wtar.tar.bz2	all -unicode/
+wtar.tar.xz	all -unicode/
+wtar.tar.zst	all -unicode/
+wtar.tar.lzma	all -unicode/
+wtar.tar.lz	all -unicode/
+wtar.tar.Z	all -unicode/
+# makecab
+cab-mszip.cab	readme.txt
+cab-lzx.cab	data/log.txt
+cab-none.cab	code/app.exe
+# Windows disc imaging (IMAPI2); the DMG wraps the UDF 1.02 image
+imapi-joliet.iso	all
+imapi-bridge.iso	all
+imapi-udf102.iso	all
+imapi-udf150.iso	all
+imapi-udf201.iso	all
+imapi-udf250.iso	all
+udf.dmg	all
+# Kompressor's own writers, read back
+kz.zip	all
+kz.7z	all
+kz.rar	all
+kz.tar	all
+kz.tar.gz	all
+kz.tar.xz	all
+kz.tar.zst	all
+kz.tar.bz2	all
+kz.tar.lz4	all
+kz.iso	all
+kz.cpio	all
+kz-pw.zip	all
+kz-split.7z.001	all
+kz-fast.kmp	all
+kz-balanced.kmp	all
+kz-ultra.kmp	all
+kz-log.txt.gz	data/log.txt>kz-log.txt
+kz-log.txt.xz	data/log.txt>kz-log.txt
+kz-log.txt.zst	data/log.txt>kz-log.txt
+kz-log.txt.bz2	data/log.txt>kz-log.txt
+kz-log.txt.lz4	data/log.txt>kz-log.txt
+# 7-Zip, when installed
+7z-lzma2.7z	all
+7z-bcj2.7z	all
+7z-ppmd.7z	all
+7z-pw.7z	all
+7z-deflate64.zip	all
+7z-ppmd.zip	all
+7z-aes-pw.zip	all
+7z.wim	all
+7z-split.7z.001	all

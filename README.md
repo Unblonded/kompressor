@@ -104,6 +104,7 @@ kompressor-cli list    <archive>
 kompressor-cli extract <archive> [-o dir] [-p password] [entry...]
 kompressor-cli test    <archive>
 kompressor-cli cat     <archive> <entry>            # one member to stdout
+kompressor-cli hash    <archive> [-a crc32|md5|sha1|sha256|all] [-c list.sha256]   # checksums, or check a list
 kompressor-cli create  out.7z|.zip|.tar.xz|... <files/folders> [-l level] [-p pw]
 kompressor-cli super   out.kmp <files/folders> [-m fast|balanced|ultra|max|extreme|ultimate] [--no-dedup]
 kompressor-cli convert <any-archive> out.7z|.zip|.tar.zst|.kmp|... [-l level] [-m mode] [-p pw] [-e new-pw]
@@ -118,6 +119,15 @@ kompressor-cli create backup.7z ~/Photos -v 4g
 # split sets (.001, .partN.rar, .r00) open from any part
 ```
 
+## Regression tests
+
+```
+powershell -File testsun.ps1 -Generate   # build the samples, then check them
+powershell -File testsun.ps1             # check again (after a code change)
+```
+
+`tests/make-samples.ps1` writes a fixed corpus of files and packs it with every writer the PC has (Python, .NET, Windows' tar, makecab, Windows disc imaging, Kompressor itself and 7-Zip when installed); missing writers are skipped. `tests/run.ps1` opens each sample with `kompressor-cli hash` and checks every file inside against Windows' own SHA-256 of the corpus, as `tests/samples.tsv` describes. The few formats with no independent reference are checked against `tests/baselines/`, which `-Update` rewrites. The exit code is the number of failures.
+
 ## Layout
 
 ```
@@ -125,6 +135,7 @@ src/core/   kz_archive (read/explore/extract/test), kz_writer (create/convert), 
 src/cli/    kompressor-cli
 src/gui/    main (GLFW/GL/fonts/HiDPI), app (explorer, preview, dialogs, jobs), file_dialog (built-in browser), theme
 src/shellext/ KompShell.dll, the Windows Explorer context-menu extension
+tests/      regression samples and runner
 ```
 
 ## Notes & limits

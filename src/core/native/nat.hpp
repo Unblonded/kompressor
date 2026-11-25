@@ -210,6 +210,7 @@ KZ_HANDLER(hIhex)
 KZ_HANDLER(hUefi)
 KZ_HANDLER(hLp)
 KZ_HANDLER(hLvm)
+KZ_HANDLER(hXar)
 #undef KZ_HANDLER
 
 // ------------------------------------------------------------------------------------------- codecs
