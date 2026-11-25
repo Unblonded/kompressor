@@ -14,6 +14,9 @@ void copyTo(char* dst, size_t n, const std::string& s);
 std::string parentDir(const std::string& p);
 // Shows a file or folder in Finder / Explorer / the Linux file manager.
 void reveal(const std::string& path);
+// Opens an archive as a folder in Windows File Explorer, when Explorer can browse that kind. False
+// (nothing opened) otherwise, and always on other systems.
+bool openInFileExplorer(const std::string& path);
 int formatIndex(kz::OutFormat f);
 // Removes temporary copies (opened / copied / dragged-out entries) left by earlier sessions, in the background.
 void startTempCleanup();

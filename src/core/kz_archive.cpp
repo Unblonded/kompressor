@@ -12,10 +12,91 @@
 #include <regex>
 
 #include "kmp.hpp"
+#include "kz_native.hpp"
+#include "kz_sniff.hpp"
 
 namespace kz {
 
 namespace {
+
+// A self-extracting program whose archive starts further in than libarchive looks (it only searches
+// the first few hundred KB): where that archive starts, or 0.
+uint64_t sfxArchiveOffset(const Source& src) {
+    std::vector<uint8_t> head;
+    uint64_t size = 0;
+    std::FILE* f = nullptr;
+    if (src.inMemory()) {
+        size = src.mem->size();
+        head.assign(src.mem->begin(), src.mem->begin() + (size_t)std::min<uint64_t>(size, 64 * 1024));
+    } else {
+        if (!volumeSet(src.path).empty()) return 0;
+#ifdef _WIN32
+        f = _wfopen(u8path(src.path).wstring().c_str(), L"rb");
+#else
+        f = std::fopen(src.path.c_str(), "rb");
+#endif
+        if (!f) return 0;
+        std::error_code ec;
+        size = fs::file_size(u8path(src.path), ec);
+        head.resize(64 * 1024);
+        head.resize(std::fread(head.data(), 1, head.size(), f));
+    }
+    uint64_t at = 0;
+    sniffSfx(head.data(), head.size(), size, [&](uint64_t off, uint8_t* dst, size_t n) -> size_t {
+        if (off >= size) return 0;
+        n = (size_t)std::min<uint64_t>(n, size - off);
+        if (src.inMemory()) {
+            std::memcpy(dst, src.mem->data() + off, n);
+            return n;
+        }
+#ifdef _WIN32
+        if (_fseeki64(f, (__int64)off, SEEK_SET) != 0) return 0;
+#else
+        if (fseeko(f, (off_t)off, SEEK_SET) != 0) return 0;
+#endif
+        return std::fread(dst, 1, n, f);
+    }, &at);
+    if (f) std::fclose(f);
+    return at;
+}
+
+// libarchive reading a file from an offset on: the archive part of a self-extracting program.
+struct SubFile {
+    std::FILE* f = nullptr;
+    uint64_t base = 0, size = 0, pos = 0;
+    std::vector<uint8_t> buf = std::vector<uint8_t>(1 << 20);
+    ~SubFile() {
+        if (f) std::fclose(f);
+    }
+    static la_ssize_t read(archive*, void* c, const void** out) {
+        auto* s = static_cast<SubFile*>(c);
+        size_t want = (size_t)std::min<uint64_t>(s->buf.size(), s->size - s->pos);
+        if (!want) return 0;
+#ifdef _WIN32
+        if (_fseeki64(s->f, (__int64)(s->base + s->pos), SEEK_SET) != 0) return -1;
+#else
+        if (fseeko(s->f, (off_t)(s->base + s->pos), SEEK_SET) != 0) return -1;
+#endif
+        size_t n = std::fread(s->buf.data(), 1, want, s->f);
+        s->pos += n;
+        *out = s->buf.data();
+        return (la_ssize_t)n;
+    }
+    static la_int64_t skip(archive*, void* c, la_int64_t req) {
+        auto* s = static_cast<SubFile*>(c);
+        uint64_t old = s->pos;
+        s->pos = std::min<uint64_t>(s->size, s->pos + (uint64_t)std::max<la_int64_t>(req, 0));
+        return (la_int64_t)(s->pos - old);
+    }
+    static la_int64_t seek(archive*, void* c, la_int64_t off, int whence) {
+        auto* s = static_cast<SubFile*>(c);
+        int64_t from = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? (int64_t)s->pos : (int64_t)s->size;
+        int64_t to = from + off;
+        if (to < 0) return ARCHIVE_FATAL;
+        s->pos = std::min<uint64_t>((uint64_t)to, s->size);
+        return (la_int64_t)s->pos;
+    }
+};
 
 }  // namespace
 
@@ -77,13 +158,64 @@ struct LaReader {
     archive* a = nullptr;
     bool raw = false;
     std::string rawName;
+    std::unique_ptr<SubFile> sub;  // reading the archive inside a self-extracting program
     ~LaReader() {
         if (a) archive_read_free(a);
     }
 
+    // The archive in a self-extracting program, when libarchive didn't find it by itself.
+    bool openSfx(const Source& src, const std::string& password) {
+        uint64_t at = sfxArchiveOffset(src);
+        if (!at) return false;
+        archive* r = archive_read_new();
+        archive_read_support_filter_all(r);
+        archive_read_support_format_all(r);
+        if (!password.empty()) archive_read_add_passphrase(r, password.c_str());
+        int rc;
+        if (src.inMemory()) {
+            rc = archive_read_open_memory(r, src.mem->data() + at, (size_t)(src.mem->size() - at));
+        } else {
+            auto s = std::make_unique<SubFile>();
+#ifdef _WIN32
+            s->f = _wfopen(u8path(src.path).wstring().c_str(), L"rb");
+#else
+            s->f = std::fopen(src.path.c_str(), "rb");
+#endif
+            std::error_code ec;
+            uint64_t size = fs::file_size(u8path(src.path), ec);
+            if (!s->f || ec || size <= at) {
+                archive_read_free(r);
+                return false;
+            }
+            s->base = at;
+            s->size = size - at;
+            archive_read_set_read_callback(r, &SubFile::read);
+            archive_read_set_skip_callback(r, &SubFile::skip);
+            archive_read_set_seek_callback(r, &SubFile::seek);
+            archive_read_set_callback_data(r, s.get());
+            rc = archive_read_open1(r);
+            sub = std::move(s);
+        }
+        if (rc != ARCHIVE_OK) {
+            archive_read_free(r);
+            sub.reset();
+            return false;
+        }
+        a = r;
+        return true;
+    }
+
     bool open(const Source& src, const std::string& password, std::string& err) {
+        if (native::claimsFirst(src)) {  // the callers then read it natively
+            err = "Read by Kompressor itself";
+            return false;
+        }
         std::string firstErr;
-        for (int attempt = 0; attempt < 2; ++attempt) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (attempt == 2) {
+                if (openSfx(src, password)) return true;
+                break;
+            }
             bool tryRaw = attempt == 1;
             archive* r = archive_read_new();
             archive_read_support_filter_all(r);
@@ -335,6 +467,135 @@ bool kmpTest(const Source& src, Progress& prog, std::string& err) {
     return true;
 }
 
+// ---------------------------------------------------------------- programs and Compound Files
+// Tried when libarchive doesn't recognise a source (see kz_native.hpp).
+bool nativeList(const native::Container& c, const Source& src, ArchiveInfo& out) {
+    out.format = c.format;
+    out.filter = "none";
+    if (!c.warning.empty()) out.extra = c.warning;
+    out.archiveSize = sourceSize(src);
+    for (auto& it : c.items) {
+        Entry x;
+        x.path = it.path;
+        x.size = it.size;
+        x.mtime = it.mtime;
+        x.mode = it.isDir ? 0755 : 0644;
+        x.isDir = it.isDir;
+        out.totalSize += it.size;
+        out.entries.push_back(std::move(x));
+    }
+    return true;
+}
+
+bool nativeExtract(const native::Container& c, const Source& src, const ExtractOptions& opt, Progress& prog, std::string& err) {
+    fs::path dest = canonicalDest(opt.destDir);
+    std::vector<std::pair<const native::Item*, std::string>> todo;
+    uint64_t total = 0;
+    for (auto& it : c.items) {
+        std::string rel;
+        if (!outputRel(it.path, opt, rel, prog)) continue;
+        todo.emplace_back(&it, rel);
+        total += it.size;
+    }
+    prog.total = total;
+    prog.done = 0;
+    int failures = 0;
+    std::error_code ec;
+    for (auto& [it, rel] : todo) {
+        if (prog.cancelled()) {
+            err = "Cancelled";
+            return false;
+        }
+        fs::path target = dest / u8path(rel);
+        prog.setStatus(rel);
+        if (it->isDir) {
+            fs::create_directories(target, ec);
+            continue;
+        }
+        if (opt.skipExisting && fs::exists(target, ec)) {
+            prog.done += it->size;
+            continue;
+        }
+        fs::create_directories(target.parent_path(), ec);
+        std::ofstream o(target, std::ios::binary | std::ios::trunc);
+        if (!o) {
+            prog.warn("Cannot create " + pathToUtf8(target));
+            ++failures;
+            continue;
+        }
+        std::string ferr;
+        bool ok = native::readItem(src, *it, [&](const uint8_t* p, size_t n) {
+            o.write((const char*)p, (std::streamsize)n);
+            prog.done += n;
+            return bool(o) && !prog.cancelled();
+        }, ferr);
+        o.close();
+        if (prog.cancelled()) {
+            fs::remove(target, ec);
+            err = "Cancelled";
+            return false;
+        }
+        if (!ok || !o) {
+            prog.warn(ferr.empty() ? "Write failed: " + rel : ferr);
+            ++failures;
+            continue;
+        }
+        if (it->mtime) setFileMTime(target, it->mtime);
+    }
+    if (failures) {
+        err = std::to_string(failures) + " file(s) failed to extract";
+        return false;
+    }
+    return true;
+}
+
+bool nativeRead(const native::Container& c, const Source& src, const std::string& path, uint64_t maxBytes,
+                std::vector<uint8_t>& out, bool& truncated, Progress& prog, std::string& err) {
+    out.clear();
+    truncated = false;
+    for (auto& it : c.items) {
+        if (it.path != path) continue;
+        prog.total = std::min<uint64_t>(it.size, maxBytes);
+        return native::readItem(src, it, [&](const uint8_t* p, size_t n) {
+            size_t room = (size_t)(maxBytes - out.size());
+            if (n > room) {
+                out.insert(out.end(), p, p + room);
+                truncated = true;
+                return false;
+            }
+            out.insert(out.end(), p, p + n);
+            prog.done = out.size();
+            return !prog.cancelled();
+        }, err);
+    }
+    err = "Entry not found: " + path;
+    return false;
+}
+
+bool nativeTest(const native::Container& c, const Source& src, Progress& prog, std::string& err) {
+    uint64_t total = 0;
+    for (auto& it : c.items) total += it.size;
+    prog.total = total;
+    int bad = 0;
+    for (auto& it : c.items) {
+        prog.setStatus(it.path);
+        std::string ferr;
+        if (!native::readItem(src, it, [&](const uint8_t*, size_t n) { prog.done += n; return !prog.cancelled(); }, ferr)) {
+            prog.warn(ferr);
+            ++bad;
+        }
+        if (prog.cancelled()) {
+            err = "Cancelled";
+            return false;
+        }
+    }
+    if (bad) {
+        err = std::to_string(bad) + " item(s) could not be read";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 // ============================================================================ public API
@@ -345,7 +606,12 @@ bool probeArchive(const Source& src, std::string& formatName) {
     }
     LaReader r;
     std::string err;
-    if (!r.open(src, "", err)) return false;
+    if (!r.open(src, "", err)) {
+        native::Container c;
+        if (!native::open(src, c, err)) return false;
+        formatName = c.format;
+        return true;
+    }
     archive_entry* e;
     int rc = archive_read_next_header(r.a, &e);
     if (rc != ARCHIVE_OK && rc != ARCHIVE_WARN && rc != ARCHIVE_EOF) {
@@ -363,6 +629,12 @@ bool listArchive(const Source& src, ArchiveInfo& out, const std::string& passwor
     LaReader r;
     if (!r.open(src, password, err)) {
         if (mentionsPassword(err)) prog.needPassword = true;
+        native::Container c;
+        std::string nerr;
+        if (!prog.needPassword && native::open(src, c, nerr)) {
+            err.clear();
+            return nativeList(c, src, out);
+        }
         return false;
     }
     out.archiveSize = sourceSize(src);
@@ -425,6 +697,12 @@ bool extractArchive(const Source& src, const ExtractOptions& opt, Progress& prog
     LaReader r;
     if (!r.open(src, opt.password, err)) {
         if (mentionsPassword(err)) prog.needPassword = true;
+        native::Container c;
+        std::string nerr;
+        if (!prog.needPassword && native::open(src, c, nerr)) {
+            err.clear();
+            return nativeExtract(c, src, opt, prog, err);
+        }
         return false;
     }
     fs::path dest = canonicalDest(opt.destDir);
@@ -541,6 +819,12 @@ bool readEntry(const Source& src, const std::string& entryPath, const std::strin
     LaReader r;
     if (!r.open(src, password, err)) {
         if (mentionsPassword(err)) prog.needPassword = true;
+        native::Container c;
+        std::string nerr;
+        if (!prog.needPassword && native::open(src, c, nerr)) {
+            err.clear();
+            return nativeRead(c, src, entryPath, maxBytes, out, truncated, prog, err);
+        }
         return false;
     }
     prog.total = sourceSize(src);
@@ -591,6 +875,12 @@ bool testArchive(const Source& src, const std::string& password, Progress& prog,
     LaReader r;
     if (!r.open(src, password, err)) {
         if (mentionsPassword(err)) prog.needPassword = true;
+        native::Container c;
+        std::string nerr;
+        if (!prog.needPassword && native::open(src, c, nerr)) {
+            err.clear();
+            return nativeTest(c, src, prog, err);
+        }
         return false;
     }
     prog.total = sourceSize(src);

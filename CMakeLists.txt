@@ -81,6 +81,29 @@ add_library(kompressor_core STATIC
   src/core/kz_cm.cpp
   src/core/kz_advisor.cpp
   src/core/kz_rar.cpp
+  src/core/native/nat_core.cpp
+  src/core/native/nat_exec.cpp
+  src/core/native/nat_cfb.cpp
+  src/core/native/nat_disk.cpp
+  src/core/native/nat_codecs.cpp
+  src/core/native/nat_fat.cpp
+  src/core/native/nat_ntfs.cpp
+  src/core/native/nat_ext.cpp
+  src/core/native/nat_squash.cpp
+  src/core/native/nat_lzx.cpp
+  src/core/native/nat_chm.cpp
+  src/core/native/nat_wim.cpp
+  src/core/native/nat_nsis.cpp
+  src/core/native/nat_small.cpp
+  src/core/native/nat_arj.cpp
+  src/core/native/nat_udf.cpp
+  src/core/native/nat_lzfse.cpp
+  src/core/native/nat_hfs.cpp
+  src/core/native/nat_dmg.cpp
+  src/core/native/nat_apfs.cpp
+  src/core/native/nat_lvm.cpp
+  src/core/native/nat_uefi.cpp
+  src/core/native/nat_pending.cpp
   src/core/kz_perf.cpp
   src/core/kz_zip.cpp
   src/core/kz_gpu.cpp

@@ -105,12 +105,17 @@ void FileDialog::draw() {
         case Mode::AddFiles: {
             static const nfdu8filteritem_t archives[] = {
                 {"Archives", "kmp,zip,7z,rar,tar,gz,tgz,bz2,tbz2,xz,txz,zst,tzst,lz4,lz,lzma,z,iso,cab,lha,lzh,xar,pkg,cpio,rpm,deb,ar,"
-                             "jar,apk,ipa,war,xpi,nupkg,whl,zipx,001"},
+                             "jar,apk,ipa,war,xpi,nupkg,whl,zipx,001,wim,swm,esd,arj"},
+                {"Disk images", "iso,img,ima,vhd,vhdx,avhdx,vmdk,vdi,qcow,qcow2,dmg,simg,udf,squashfs,sfs,cramfs,hfs,hfsx,"
+                                "apfs,ext2,ext3,ext4,fat,ntfs,mbr,gpt"},
+                {"Programs and installers", "exe,dll,sys,ocx,cpl,scr,efi,mui,msi,msp,msm,mst,so,dylib,o,obj,elf,ko,te"},
+                {"Documents (Compound File)", "doc,xls,ppt,msg,pub,vsd"},
+                {"Help, media and other", "chm,chi,chw,hxs,swf,flv,hex,ihx,b64,base64,fd,rom,cap,scap,ex_,dl_,sy_"},
             };
             nfdopendialogu8args_t args{};
             if (mode_ == Mode::OpenArchives) {
                 args.filterList = archives;
-                args.filterCount = 1;
+                args.filterCount = 5;
             }
             args.defaultPath = defPath;
             args.parentWindow = parent;

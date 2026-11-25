@@ -46,7 +46,61 @@ inline Sniffed sniff(const uint8_t* p, size_t n) {
     if (is("WARC/", 5)) return {"WARC", "warc"};
     if (n >= 7 && p[2] == '-' && p[3] == 'l' && (p[4] == 'h' || p[4] == 'z') && p[6] == '-') return {"LHA", "lzh"};
     if (at(32769, "CD001", 5)) return {"ISO 9660", "iso"};
+    // Read by Kompressor itself.
+    if (is("MSWIM\0\0\0", 8)) return {"WIM", "wim"};
+    if (is("vhdxfile", 8)) return {"VHDX", "vhdx"};
+    if (is("QFI\xFB", 4)) return {"QCOW2", "qcow2"};
+    if (is("KDMV", 4)) return {"VMDK", "vmdk"};
+    if (at(64, "\x7F\x10\xDA\xBE", 4) && is("<<< ", 4)) return {"VDI", "vdi"};
+    if (is("hsqs", 4)) return {"SquashFS", "squashfs"};
+    if (is("\x45\x3D\xCD\x28", 4)) return {"CramFS", "cramfs"};
+    // ARJ: its signature is only two bytes, so the first header must also look right (an archive header).
+    if (is("\x60\xEA", 2) && n > 10 && (p[2] | p[3] << 8) >= 30 && (p[2] | p[3] << 8) <= 2600 && p[10] == 2)
+        return {"ARJ", "arj"};
     return {};
+}
+
+// Where a Windows program's (PE) own image ends in its file, which is where anything appended to it
+// starts (a self-extracting archive's data, an installer's payload), or 0 when `p` is not the start of
+// a PE file. `p` must hold the headers (the first 4 KiB nearly always do).
+inline uint64_t peImageEnd(const uint8_t* p, size_t n) {
+    auto rd16 = [&](size_t o) { return (uint32_t)p[o] | (uint32_t)p[o + 1] << 8; };
+    auto rd32 = [&](size_t o) { return rd16(o) | rd16(o + 2) << 16; };
+    if (n < 0x40 || p[0] != 'M' || p[1] != 'Z') return 0;
+    size_t pe = rd32(0x3C);
+    if (pe > n || n - pe < 24 || std::memcmp(p + pe, "PE\0\0", 4) != 0) return 0;
+    size_t nsec = rd16(pe + 6), table = pe + 24 + rd16(pe + 20);
+    if (table > n || (n - table) / 40 < nsec) return 0;
+    uint64_t end = 0;
+    for (size_t i = 0; i < nsec; ++i) {
+        size_t s = table + i * 40;
+        uint64_t raw = rd32(s + 16), at = rd32(s + 20);
+        if (raw && at + raw > end) end = at + raw;
+    }
+    return end;
+}
+
+// A self-extracting archive: a Windows program with a 7z, RAR, ZIP or Cabinet archive appended. Looks
+// in the first 64 KiB after the program's image (7-Zip's installers put a short config text first).
+// `readAt(offset, dst, n)` returns how many bytes it read. Returns where the archive starts in `at`.
+template <class ReadAt>
+Sniffed sniffSfx(const uint8_t* head, size_t n, uint64_t fileSize, ReadAt&& readAt, uint64_t* at = nullptr) {
+    uint64_t start = peImageEnd(head, n);
+    if (!start || start >= fileSize) return {};
+    constexpr size_t kLook = 64 * 1024;
+    uint8_t* buf = new uint8_t[kLook + 8];
+    size_t got = readAt(start, buf, kLook);
+    Sniffed r;
+    for (size_t i = 0; i + 8 <= got && !r; ++i) {
+        const uint8_t* q = buf + i;
+        if (std::memcmp(q, "7z\xBC\xAF\x27\x1C", 6) == 0) r = {"7-Zip (self-extracting)", "exe"};
+        else if (std::memcmp(q, "Rar!\x1A\x07", 6) == 0) r = {"RAR (self-extracting)", "exe"};
+        else if (std::memcmp(q, "PK\x03\x04", 4) == 0) r = {"ZIP (self-extracting)", "exe"};
+        else if (std::memcmp(q, "MSCF\0\0\0\0", 8) == 0) r = {"Cabinet (self-extracting)", "exe"};
+        if (r && at) *at = start + i;
+    }
+    delete[] buf;
+    return r;
 }
 
 // Whether a file name's extension already says this format (zip-based names like .docx or .jar count
@@ -77,6 +131,12 @@ inline bool nameFits(const char* fileName, const Sniffed& s) {
     if (x == "xar") return any({"xar", "pkg"});
     if (x == "lzh") return any({"lzh", "lha"});
     if (x == "iso") return any({"iso", "img"});
+    if (x == "wim") return any({"wim", "swm", "esd"});
+    if (x == "vhdx") return any({"vhdx", "avhdx"});
+    if (x == "qcow2") return any({"qcow2", "qcow", "img"});
+    if (x == "squashfs") return any({"squashfs", "sfs", "sqsh", "img", "snap"});
+    if (x == "cramfs") return any({"cramfs", "img"});
+    if (x == "arj") return any({"arj", "a01"}) || (e[0] == 'a' && e[1] >= '0' && e[1] <= '9');  // .a01 volumes
     return std::strcmp(e, s.ext) == 0;
 }
 

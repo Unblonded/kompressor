@@ -194,6 +194,13 @@ void App::copySelection(ExplorerTab& t) {
 }
 
 // ---------------------------------------------------------------------------------------------- drag out
+void App::syncDropJob() {
+    if (dropJob_ && !dropJob_->visible && dropStarted_.load()) {
+        dropJob_->visible = true;
+        dropJob_->started = ImGui::GetTime();
+    }
+}
+
 void App::afterFrame() {
     if (pendingDrag_ < 0 || dragging_) return;
     int tabId = pendingDrag_;
@@ -216,16 +223,36 @@ void App::dragSelectionOut(int tabId) {
     size_t n = predicted.size();
     bool needPw = false;
 
+    // The drop's extraction is listed with the other jobs (hidden until the files are released over a
+    // target). No pause or cancel buttons: the drag still holds the mouse while it runs, so Esc cancels.
+    auto job = std::make_unique<Job>();
+    Job* dj = job.get();
+    dj->id = nextJobId_++;
+    dj->title = "Dropping " + countText(n, "item") + " out of " + title + " (Esc cancels)";
+    dj->visible = false;
+    dj->controls = false;
+    jobs_.push_back(std::move(job));
+    dropJob_ = dj;
+    dropStarted_ = false;
+    std::shared_ptr<kz::Progress> prog = dj->prog;
+
     dragging_ = true;
-    bool dropped = native::dragFilesOut(window_, predicted, [&]() -> std::vector<std::string> {
-        kz::Progress p;
-        if (!extractGroups(src, pw, groups, dir, p, err)) {
-            needPw = p.needPassword;
-            return {};
-        }
-        return topLevel(dir);
-    });
+    bool dropped = native::dragFilesOut(window_, predicted,
+        [&]() -> std::vector<std::string> {
+            prog->setStatus("Extracting...");
+            dropStarted_ = true;
+            glfwPostEmptyEvent();
+            if (!extractGroups(src, pw, groups, dir, *prog, err)) {
+                needPw = prog->needPassword;
+                return {};
+            }
+            return topLevel(dir);
+        },
+        [prog] { prog->cancel = true; });
     dragging_ = false;
+    dropJob_ = nullptr;
+    dj->ok = dropped;
+    dj->finished = true;  // the next frame takes it off the list
     glfwPostEmptyEvent();
 
     if (dropped) {
@@ -234,7 +261,9 @@ void App::dragSelectionOut(int tabId) {
     }
     std::error_code ec;
     fs::remove_all(kz::u8path(dir), ec);
-    if (needPw) {
+    if (prog->cancel) {
+        log(col::Dim, "Drop cancelled");
+    } else if (needPw) {
         askPassword("\"" + title + "\" is encrypted. Enter its password, then drag the files again:", [this, tabId](const std::string& pw) {
             if (ExplorerTab* t = tabById(tabId)) t->password = pw;
         });

@@ -20,6 +20,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #else
 #include <spawn.h>
 #include <sys/wait.h>
@@ -87,6 +88,39 @@ void reveal(const std::string& path) {
     else launch({"open", "-R", path});
 #else
     launch({"xdg-open", dir ? path : parentDir(path)});
+#endif
+}
+
+bool openInFileExplorer(const std::string& path) {
+#ifdef _WIN32
+    // Explorer browses the archives Windows understands (ZIP everywhere; 7z, RAR, TAR... on recent
+    // Windows 11) as folders. Ask the shell, so the archive's default app (maybe us) isn't launched.
+    HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool ok = false;
+    std::wstring w = kz::u8path(path).wstring();
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    SFGAOF attrs = 0;
+    if (SUCCEEDED(SHParseDisplayName(w.c_str(), nullptr, &pidl, SFGAO_FOLDER, &attrs)) && pidl) {
+        if (attrs & SFGAO_FOLDER) {
+            SHELLEXECUTEINFOW ei{};
+            ei.cbSize = sizeof ei;
+            ei.fMask = SEE_MASK_IDLIST;
+            ei.lpVerb = L"explore";
+            ei.lpIDList = pidl;
+            ei.nShow = SW_SHOWNORMAL;
+            ok = ShellExecuteExW(&ei) != FALSE;
+            if (!ok) {  // some folder views only take "open"
+                ei.lpVerb = L"open";
+                ok = ShellExecuteExW(&ei) != FALSE;
+            }
+        }
+        CoTaskMemFree(pidl);
+    }
+    if (SUCCEEDED(co)) CoUninitialize();
+    return ok;
+#else
+    (void)path;
+    return false;
 #endif
 }
 
@@ -757,6 +791,14 @@ void App::testArchiveFile(const std::string& path) {
 }
 
 void App::actionTest(ExplorerTab& t) { runTest(t.id); }
+
+void App::openInExplorer(ExplorerTab& t) {
+    if (t.src.inMemory()) return;
+    if (openInFileExplorer(t.src.path)) return;
+    // Explorer can't browse this kind: show the file there instead.
+    reveal(t.src.path);
+    log(col::Dim, "File Explorer can't open " + t.title + " as a folder, so it's shown in its folder instead.");
+}
 
 void App::runTest(int tabId) {
     ExplorerTab* t = tabById(tabId);

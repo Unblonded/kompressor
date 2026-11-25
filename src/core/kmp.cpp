@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <condition_variable>
 #include <deque>
 #include <fstream>
 #include <future>
@@ -252,8 +253,29 @@ int ceilLog2(uint64_t v) {
     return r;
 }
 
-bool zstdCompress(const uint8_t* in, size_t n, int level, bool longRange, std::vector<uint8_t>& out) {
-    ZSTD_CCtx* c = ZSTD_createCCtx();
+// Thrown inside a block job when the user cancels, so a block that takes minutes stops within a
+// moment instead of running to the end first.
+struct BlockCancelled : std::runtime_error {
+    BlockCancelled() : std::runtime_error("Cancelled") {}
+};
+
+// Between steps of a block: waits while the job is paused, stops it when cancelled.
+void checkpoint(Progress* prog) {
+    if (!prog) return;
+    prog->waitWhilePaused();
+    if (prog->cancel.load(std::memory_order_relaxed)) throw BlockCancelled();
+}
+
+// The block codecs are fed 1 MiB at a time, so pause and cancel take effect mid-block.
+constexpr size_t kStep = 1 << 20;
+
+bool zstdCompress(const uint8_t* in, size_t n, int level, bool longRange, std::vector<uint8_t>& out,
+                  Progress* prog = nullptr) {
+    struct Ctx {
+        ZSTD_CCtx* c = ZSTD_createCCtx();
+        ~Ctx() { ZSTD_freeCCtx(c); }
+    } ctx;
+    ZSTD_CCtx* c = ctx.c;
     if (!c) return false;
     ZSTD_CCtx_setParameter(c, ZSTD_c_compressionLevel, level);
     ZSTD_CCtx_setParameter(c, ZSTD_c_checksumFlag, 0);
@@ -261,15 +283,29 @@ bool zstdCompress(const uint8_t* in, size_t n, int level, bool longRange, std::v
         ZSTD_CCtx_setParameter(c, ZSTD_c_enableLongDistanceMatching, 1);
         ZSTD_CCtx_setParameter(c, ZSTD_c_windowLog, std::clamp(ceilLog2(n), 10, 27));
     }
+    ZSTD_CCtx_setPledgedSrcSize(c, n);
     out.resize(ZSTD_compressBound(n));
-    size_t r = ZSTD_compress2(c, out.data(), out.size(), in, n);
-    ZSTD_freeCCtx(c);
-    if (ZSTD_isError(r)) return false;
-    out.resize(r);
+    ZSTD_outBuffer o{out.data(), out.size(), 0};
+    size_t at = 0;
+    for (;;) {
+        checkpoint(prog);
+        size_t take = std::min(kStep, n - at);
+        ZSTD_inBuffer i{in + at, take, 0};
+        at += take;
+        ZSTD_EndDirective mode = at >= n ? ZSTD_e_end : ZSTD_e_continue;
+        size_t r;
+        do {
+            r = ZSTD_compressStream2(c, &o, &i, mode);
+            if (ZSTD_isError(r)) return false;
+        } while (mode == ZSTD_e_end ? r != 0 : i.pos < i.size);
+        if (mode == ZSTD_e_end) break;
+    }
+    out.resize(o.pos);
     return true;
 }
 
-bool lzmaCompress(const uint8_t* in, size_t n, uint8_t filter, bool text, uint32_t& dict, std::vector<uint8_t>& out) {
+bool lzmaCompress(const uint8_t* in, size_t n, uint8_t filter, bool text, uint32_t& dict, std::vector<uint8_t>& out,
+                  Progress* prog = nullptr) {
     lzma_options_lzma opt;
     if (lzma_lzma_preset(&opt, 9 | LZMA_PRESET_EXTREME)) return false;
     uint64_t d = 1ull << std::clamp(ceilLog2(n), 16, 30);
@@ -290,10 +326,31 @@ bool lzmaCompress(const uint8_t* in, size_t n, uint8_t filter, bool text, uint32
     f[k++] = {LZMA_FILTER_LZMA2, &opt};
     f[k] = {LZMA_VLI_UNKNOWN, nullptr};
     out.resize(n + n / 4 + 64 * 1024);
-    size_t pos = 0;
-    lzma_ret r = lzma_raw_buffer_encode(f, nullptr, in, n, out.data(), &pos, out.size());
-    if (r != LZMA_OK) return false;
-    out.resize(pos);
+    struct Stream {
+        lzma_stream s = LZMA_STREAM_INIT;
+        ~Stream() { lzma_end(&s); }
+    } st;
+    lzma_stream& s = st.s;
+    if (lzma_raw_encoder(&s, f) != LZMA_OK) return false;
+    s.next_out = out.data();
+    s.avail_out = out.size();
+    size_t at = 0;
+    for (;;) {
+        checkpoint(prog);
+        size_t take = std::min(kStep, n - at);
+        s.next_in = in + at;
+        s.avail_in = take;
+        at += take;
+        lzma_action a = at >= n ? LZMA_FINISH : LZMA_RUN;
+        lzma_ret r = LZMA_OK;
+        while (s.avail_in > 0 || a == LZMA_FINISH) {
+            r = lzma_code(&s, a);
+            if (r == LZMA_STREAM_END) break;
+            if (r != LZMA_OK || s.avail_out == 0) return false;  // no room: the block gets stored instead
+        }
+        if (r == LZMA_STREAM_END) break;
+    }
+    out.resize((size_t)s.total_out);
     dict = opt.dict_size;
     return true;
 }
@@ -373,18 +430,19 @@ DoneBlock compressJob(PendingBlock pb, Mode mode, Progress* prog) {
     d.rec.hash = XXH3_64bits(in, n);
     // These bytes were counted as read; hand them over to "done" as the work actually happens.
     size_t reported = 0;
-    auto tick = [&](size_t k) {
+    auto report = [&](size_t k) {
         k = std::min(k, n - reported);
         reported += k;
-        if (prog) {
-            prog->pending -= (int64_t)k;
-            prog->waitWhilePaused();  // context mixing ticks every 64 KiB: pause mid-block
-        }
+        if (prog) prog->pending -= (int64_t)k;
+    };
+    auto tick = [&](size_t k) {
+        report(k);
+        checkpoint(prog);  // context mixing ticks every 64 KiB: pause or cancel mid-block
     };
     struct Settle {
         std::function<void()> f;
         ~Settle() { f(); }
-    } settle{[&] { tick(n); }};
+    } settle{[&] { report(n); }};
 
     bool have = false;
     auto consider = [&](std::vector<uint8_t>&& data, uint8_t codec, uint8_t filter, uint32_t param) {
@@ -398,12 +456,12 @@ DoneBlock compressJob(PendingBlock pb, Mode mode, Progress* prog) {
     };
     auto tryZstd = [&](int level, bool ldm) {
         std::vector<uint8_t> o;
-        if (zstdCompress(in, n, level, ldm, o)) consider(std::move(o), CodecZstd, FilterNone, 0);
+        if (zstdCompress(in, n, level, ldm, o, prog)) consider(std::move(o), CodecZstd, FilterNone, 0);
     };
     auto tryLzma = [&](uint8_t filter, bool text) {
         std::vector<uint8_t> o;
         uint32_t dict = 0;
-        if (lzmaCompress(in, n, filter, text, dict, o)) consider(std::move(o), CodecLzma2, filter, dict);
+        if (lzmaCompress(in, n, filter, text, dict, o, prog)) consider(std::move(o), CodecLzma2, filter, dict);
     };
 
     uint8_t exeFilter = pb.cat == CatX86 ? FilterX86 : (pb.cat == CatArm64 ? FilterArm64 : FilterNone);
@@ -502,7 +560,13 @@ struct Writer::Impl {
     std::vector<Entry> entries;
     std::unordered_map<H128, uint32_t, H128Hash> seen;
     std::unique_ptr<PendingBlock> open[CatCount];
+    // Blocks being compressed or waiting to be written. They are written in the order they finish
+    // (the index records where each one is), so one slow block never holds up the rest: data that
+    // only needs storing streams past it on every other core.
     std::deque<std::future<DoneBlock>> inflight;
+    std::mutex doneM;
+    std::condition_variable doneCv;
+    uint64_t finishedJobs = 0, seenJobs = 0;  // under doneM
     Stats st;
 
     bool inFile = false;
@@ -568,24 +632,68 @@ struct Writer::Impl {
         open[cat].reset();
         Mode m = opt.mode;
         Progress* pr = prog;
-        inflight.push_back(pool->submit([pb = std::move(pb), m, pr]() mutable { return compressJob(std::move(pb), m, pr); }));
+        Impl* self = this;
+        inflight.push_back(pool->submit([pb = std::move(pb), m, pr, self]() mutable {
+            struct Signal {  // wakes the writer once this block is done (or failed)
+                Impl* s;
+                ~Signal() {
+                    {
+                        std::lock_guard<std::mutex> lk(s->doneM);
+                        s->finishedJobs++;
+                    }
+                    s->doneCv.notify_all();
+                }
+            } sig{self};
+            return compressJob(std::move(pb), m, pr);
+        }));
         // Write out whatever is already finished, and keep the queue (and its memory) bounded.
-        while (!inflight.empty() && inflight.front().wait_for(std::chrono::seconds(0)) == std::future_status::ready) drainOne();
-        while (inflight.size() >= maxQueued) drainOne();
+        writeReady();
+        while (!failed && inflight.size() >= maxQueued) waitAny();
     }
 
-    void drainOne() {
-        if (inflight.empty()) return;
+    // Writes every block that has finished, in whatever order. Returns how many.
+    size_t writeReady() {
+        size_t n = 0;
+        for (auto it = inflight.begin(); it != inflight.end();) {
+            if (it->wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                ++it;
+                continue;
+            }
+            std::future<DoneBlock> f = std::move(*it);
+            it = inflight.erase(it);
+            writeBlock(f);
+            n++;
+        }
+        return n;
+    }
+
+    // Waits until at least one block has been written (or the job was cancelled or failed).
+    void waitAny() {
         if (prog) prog->setStatus("Compressing blocks...");
+        while (!inflight.empty() && !failed) {
+            if (writeReady()) return;
+            if (prog && prog->cancel.load()) {
+                fail("Cancelled");
+                return;
+            }
+            std::unique_lock<std::mutex> lk(doneM);
+            doneCv.wait_for(lk, std::chrono::milliseconds(20), [&] { return finishedJobs != seenJobs; });
+            seenJobs = finishedJobs;
+        }
+    }
+
+    void writeBlock(std::future<DoneBlock>& f) {
         DoneBlock d;
         try {
-            d = inflight.front().get();
+            d = f.get();
+        } catch (const BlockCancelled&) {
+            fail("Cancelled");
+            return;
         } catch (const std::exception& e) {
-            inflight.pop_front();
             fail(std::string("block compression failed: ") + e.what());
             return;
         }
-        inflight.pop_front();
+        if (failed) return;
         BlockRec& r = blocks[d.id];
         r = d.rec;
         r.offset = pos;
@@ -726,7 +834,12 @@ bool Writer::finish(std::string& err) {
     }
     endFile();
     for (int c = 0; c < CatCount; ++c) d->flushBlock(c);
-    while (!d->inflight.empty()) d->drainOne();
+    while (!d->failed && !d->inflight.empty()) d->waitAny();
+    if (d->failed) {
+        abort();
+        err = d->err;
+        return false;
+    }
     if (d->prog) d->prog->setStatus("Writing index...");
 
     // Drop block slots that were opened but never received data (cannot happen, but be safe).
@@ -1067,7 +1180,10 @@ bool Reader::open(const Source& src, std::string& err) {
             e.hash = in.u64le();
             if (e.type == EntryType::Symlink) e.link = in.str();
             uint64_t n = in.var();
-            if (n > nc) throw std::runtime_error("bad chunk list");
+            // A file may list a deduplicated chunk many times over (a disc image full of padding refers to
+            // the same zero chunk again and again), so its list can be far longer than the number of
+            // distinct chunks. Each reference takes at least one byte of the index, which bounds it.
+            if (n > raw.size()) throw std::runtime_error("bad chunk list");
             e.chunks.resize((size_t)n);
             int64_t prev = -1;
             for (auto& c : e.chunks) {

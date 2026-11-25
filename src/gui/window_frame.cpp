@@ -1,5 +1,7 @@
 #include "window_frame.hpp"
 
+#include "native_files.hpp"
+
 #include <GLFW/glfw3.h>
 
 #ifdef _WIN32
@@ -20,6 +22,7 @@ std::vector<Rect> g_interactive;
 
 #ifdef _WIN32
 WNDPROC g_prevProc = nullptr;
+constexpr UINT_PTR kRedrawTimer = 0x4B5A;
 
 int resizeBorder(HWND h) {
     UINT dpi = GetDpiForWindow(h);
@@ -72,6 +75,20 @@ LRESULT CALLBACK frameProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return HTCLIENT;
         }
+        // Moving or resizing the window runs Windows' own loop until the mouse is released, and the
+        // window stood still meanwhile (jobs' progress included). A timer keeps it drawing.
+        case WM_ENTERSIZEMOVE:
+            SetTimer(h, kRedrawTimer, 15, nullptr);
+            break;
+        case WM_EXITSIZEMOVE:
+            KillTimer(h, kRedrawTimer);
+            break;
+        case WM_TIMER:
+            if (wp == kRedrawTimer) {
+                native::redraw();
+                return 0;
+            }
+            break;
         default:
             break;
     }

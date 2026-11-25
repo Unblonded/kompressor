@@ -26,11 +26,32 @@ extern char** environ;
 
 namespace kzgui::native {
 
+namespace {
+std::function<void()> g_redraw;
+}  // namespace
+
+void setRedraw(std::function<void()> f) { g_redraw = std::move(f); }
+
+void redraw() {
+    if (g_redraw) g_redraw();
+}
+
 #ifdef _WIN32
 
 namespace {
 
 bool g_ole = false;
+
+// Keeps the window drawing while a modal loop that isn't ours runs on this thread (the drag loop, and
+// our own wait for the files of a drop): it dispatches the timer's messages, the timer draws a frame.
+void CALLBACK redrawTick(HWND, UINT, UINT_PTR, DWORD) { redraw(); }
+
+struct RedrawTimer {
+    UINT_PTR id = SetTimer(nullptr, 0, 15, redrawTick);
+    ~RedrawTimer() {
+        if (id) KillTimer(nullptr, id);
+    }
+};
 
 // A DROPFILES block (CF_HDROP) listing `paths` as wide strings.
 HGLOBAL makeHdrop(const std::vector<std::string>& paths) {
@@ -74,20 +95,22 @@ bool setHdrop(IDataObject* obj, const std::vector<std::string>& paths) {
 
 // Runs `work` on a worker thread while this (UI) thread keeps dispatching window messages, so the
 // window repaints and Windows doesn't flag it as hung.
-template <class F>
-void runPumping(F&& work) {
+// `tick` runs on this thread between batches of messages.
+template <class F, class T>
+void runPumping(F&& work, T&& tick) {
     std::atomic<bool> done{false};
     std::thread t([&] {
         work();
         done = true;
     });
     while (!done) {
-        MsgWaitForMultipleObjects(0, nullptr, FALSE, 30, QS_ALLINPUT);
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 15, QS_ALLINPUT);
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&m);
             DispatchMessageW(&m);
         }
+        tick();
     }
     t.join();
 }
@@ -102,7 +125,9 @@ bool ownWindowAt(POINT pt) {
 
 class DropSource : public IDropSource {
 public:
-    DropSource(IDataObject* obj, const std::function<std::vector<std::string>()>& prepare) : obj_(obj), prepare_(prepare) {}
+    DropSource(IDataObject* obj, const std::function<std::vector<std::string>()>& prepare,
+               const std::function<void()>& cancel)
+        : obj_(obj), prepare_(prepare), cancel_(cancel) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
         if (riid == IID_IUnknown || riid == IID_IDropSource) {
             *out = static_cast<IDropSource*>(this);
@@ -124,7 +149,16 @@ public:
         // Released over a target: create the files now, then let the drop go ahead.
         std::vector<std::string> real;
         SetCursor(LoadCursor(nullptr, IDC_WAIT));
-        runPumping([&] { real = prepare_(); });
+        // The drag loop still holds the mouse, so the window's buttons can't be clicked meanwhile:
+        // Esc stops the extraction (and with it the drop).
+        bool stopped = false;
+        runPumping([&] { real = prepare_(); },
+                   [&] {
+                       if (!stopped && cancel_ && (GetAsyncKeyState(VK_ESCAPE) & 0x8000)) {
+                           stopped = true;
+                           cancel_();
+                       }
+                   });
         if (real.empty() || !setHdrop(obj_, real)) return DRAGDROP_S_CANCEL;
         return DRAGDROP_S_DROP;
     }
@@ -136,6 +170,7 @@ public:
 private:
     IDataObject* obj_;
     const std::function<std::vector<std::string>()>& prepare_;
+    const std::function<void()>& cancel_;
     ULONG ref_ = 1;
     DWORD effect_ = DROPEFFECT_NONE;
 };
@@ -190,7 +225,7 @@ bool setClipboardFiles(GLFWwindow* window, const std::vector<std::string>& paths
 }
 
 bool dragFilesOut(GLFWwindow* window, const std::vector<std::string>& paths,
-                  const std::function<std::vector<std::string>()>& prepare) {
+                  const std::function<std::vector<std::string>()>& prepare, const std::function<void()>& cancel) {
     if (!g_ole || paths.empty()) return false;
     IDataObject* obj = nullptr;
     if (FAILED(SHCreateDataObject(nullptr, 0, nullptr, nullptr, IID_PPV_ARGS(&obj)))) return false;
@@ -200,9 +235,13 @@ bool dragFilesOut(GLFWwindow* window, const std::vector<std::string>& paths,
     }
     HWND hwnd = glfwGetWin32Window(window);
     DragAcceptFiles(hwnd, FALSE);  // our own window is not a target while we are the source
-    DropSource src(obj, prepare);
+    DropSource src(obj, prepare, cancel);
     DWORD effect = DROPEFFECT_NONE;
-    HRESULT hr = DoDragDrop(obj, &src, DROPEFFECT_COPY, &effect);
+    HRESULT hr;
+    {
+        RedrawTimer keepDrawing;  // through the drag and the extraction for the drop
+        hr = DoDragDrop(obj, &src, DROPEFFECT_COPY, &effect);
+    }
     DragAcceptFiles(hwnd, TRUE);
     // The drag loop ate the button release. GLFW captured the mouse on the press and only lets go on a
     // release, so without one every mouse move would keep going to this window (another window under
@@ -238,7 +277,8 @@ void openWithDefaultApp(const std::string& path) {
 bool fileTransferSupported() { return false; }
 std::vector<std::string> clipboardFiles() { return {}; }
 bool setClipboardFiles(GLFWwindow*, const std::vector<std::string>&) { return false; }
-bool dragFilesOut(GLFWwindow*, const std::vector<std::string>&, const std::function<std::vector<std::string>()>&) {
+bool dragFilesOut(GLFWwindow*, const std::vector<std::string>&, const std::function<std::vector<std::string>()>&,
+                  const std::function<void()>&) {
     return false;
 }
 

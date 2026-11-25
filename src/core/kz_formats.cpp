@@ -97,6 +97,23 @@ const std::vector<std::pair<std::string, std::string>>& readableFormats() {
         {"CPIO / RPM", "including RPM payloads"},
         {"AR / DEB / LIB / A", "Unix archives and Debian packages (explore nested tarballs)"},
         {"WARC / MTREE / SHAR", "web archives and manifests"},
+        {"EXE (self-extracting)", "7-Zip, RAR, ZIP and Cabinet archives inside programs"},
+        {"EXE / DLL / SYS / EFI", "Windows programs: sections, resources (icons, bitmaps, version, manifest), overlay"},
+        {"MSI / MSP / DOC / XLS / PPT / MSG", "Compound Files: installer and document streams, embedded cabinets"},
+        {"NSIS installers", "Nullsoft setup programs: LZMA (solid), deflate and stored, with $INSTDIR/$PLUGINSDIR paths"},
+        {"WIM / SWM / ESD", "Windows images: XPRESS, LZX, LZMS, solid ESD, split images"},
+        {"CHM / HXS", "compiled HTML help"},
+        {"ARJ", "methods 0-4"},
+        {"VHD / VHDX / VMDK / VDI / QCOW2 / IMG", "virtual and raw disks, straight through to their partitions"},
+        {"DMG", "Apple disk images: zlib, bzip2, ADC, LZFSE, LZMA"},
+        {"MBR / GPT / APM / LVM / Android super", "partition maps and volume managers"},
+        {"NTFS / FAT / exFAT / ext2-4", "file systems, incl. NTFS and Windows compact-file compression"},
+        {"HFS+ / HFSX / APFS", "Mac file systems, incl. compressed files"},
+        {"UDF / SquashFS / CramFS", "disc and read-only file systems"},
+        {"ELF / Mach-O / TE / COFF", "program sections; universal (fat) Mach-O binaries"},
+        {"UEFI firmware", "firmware volumes, capsules and flash images: PE, TE, raw, LZMA and Tiano sections"},
+        {"SWF / FLV", "Flash: the movie inside compressed SWFs, pictures and sounds, video and audio streams"},
+        {"MsLZ (.ex_) / Base64 / Intel HEX", "COMPRESS.EXE files, base64 text, firmware HEX images"},
     };
     return r;
 }
@@ -106,7 +123,11 @@ bool looksLikeArchive(const std::string& name) {
                                  "docx", "xlsx", "pptx", "odt", "ods", "odp", "7z", "rar", "tar", "gz", "tgz", "bz2", "tbz",
                                  "tbz2", "xz", "txz", "lzma", "zst", "tzst", "lz4", "lz", "lzo", "z", "uu", "iso", "cab",
                                  "lha", "lzh", "xar", "pkg", "cpio", "rpm", "ar", "deb", "a", "warc", "mtree", "shar",
-                                 "crx", "vsix", "appx", "msix", "cbz", "cbr", "cb7", "001"};
+                                 "crx", "vsix", "appx", "msix", "cbz", "cbr", "cb7", "001",
+                                 // read by Kompressor itself: images, disks and other archivers
+                                 "wim", "swm", "esd", "arj", "dmg", "vhd", "vhdx", "avhdx", "vmdk", "vdi", "qcow", "qcow2",
+                                 "img", "ima", "simg", "squashfs", "sfs", "cramfs", "udf", "hfs", "hfsx", "apfs", "ext2",
+                                 "ext3", "ext4", "fat", "ntfs", "mbr", "gpt"};
     if (looksLikeVolume(name)) return true;
     std::string e = lowerExt(name);
     if (e.empty()) return false;
@@ -120,13 +141,42 @@ Sniffed sniffFile(const std::string& path) {
     if (!f) return {};
     std::vector<uint8_t> buf(kSniffBytes);
     f.read((char*)buf.data(), (std::streamsize)buf.size());
-    return sniff(buf.data(), (size_t)f.gcount());
+    size_t got = (size_t)f.gcount();
+    if (Sniffed s = sniff(buf.data(), got)) return s;
+    // A self-extracting archive is a program with the archive after it.
+    std::error_code ec;
+    uint64_t size = std::filesystem::file_size(u8path(path), ec);
+    if (ec) return {};
+    f.clear();
+    return sniffSfx(buf.data(), got, size, [&](uint64_t off, uint8_t* dst, size_t n) -> size_t {
+        f.clear();
+        f.seekg((std::streamoff)off);
+        f.read((char*)dst, (std::streamsize)n);
+        return (size_t)f.gcount();
+    });
+}
+
+bool opensAsContainer(const std::string& name) {
+    static const char* exts[] = {"exe", "dll", "sys", "ocx", "cpl", "scr", "efi", "mui", "ax",  "drv",
+                                 "msi", "msp", "msm", "mst", "doc", "xls", "ppt", "msg", "pub", "vsd",
+                                 // files that are something else first, but hold files too
+                                 "chm", "chi", "chw", "hxs", "swf", "flv", "hex", "ihx", "b64", "base64", "so", "dylib",
+                                 "o", "obj", "elf", "ko", "axf", "te", "fd", "rom", "cap", "scap", "lpimg"};
+    std::string e = lowerExt(name);
+    for (const char* x : exts)
+        if (e == x) return true;
+    // MS-DOS "COMPRESS" files: the last letter of the extension became "_" (setup.ex_, readme.tx_).
+    return e.size() == 3 && e[2] == '_';
 }
 
 bool isArchiveFile(const std::string& path) {
     std::error_code ec;
     if (!std::filesystem::is_regular_file(u8path(path), ec)) return false;
-    return (bool)sniffFile(path) || looksLikeArchive(path);
+    // A self-extracting program still counts as a program here: dropped on the window it gets
+    // compressed. Open (or "Open archive") shows the archive inside it.
+    Sniffed s = sniffFile(path);
+    if (s && std::strcmp(s.ext, "exe") != 0) return true;
+    return looksLikeArchive(path);
 }
 
 }  // namespace kz

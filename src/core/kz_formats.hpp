@@ -54,5 +54,9 @@ Sniffed sniffFile(const std::string& path);
 // A regular file Kompressor can open: by its content, or failing that by its name (split parts after
 // the first carry no header).
 bool isArchiveFile(const std::string& path);
+// Files that aren't archives but open like one when asked to, as in 7-Zip: programs and libraries
+// (their sections and resources), MSI installers and other Compound Files (their streams). Dropping
+// one on the window still compresses it; Open, "Open archive" and "Open as archive" open it.
+bool opensAsContainer(const std::string& name);
 
 }  // namespace kz

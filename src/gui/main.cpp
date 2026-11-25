@@ -15,8 +15,11 @@
 #include <GL/gl.h>
 #endif
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -374,6 +377,7 @@ int main(int argc, char** argv) {
             inFrame = false;
         };
         g_render = renderFrame;
+        kzgui::native::setRedraw(renderFrame);
         glfwSetWindowRefreshCallback(window, [](GLFWwindow*) {
             if (g_render) g_render();
         });
@@ -390,18 +394,32 @@ int main(int argc, char** argv) {
             return false;
         };
         int settleFrames = 0;
+        // Vsync paces the loop only while the window is on screen: covered or minimized, Windows
+        // returns from SwapBuffers at once and an animation (the job spinner) would redraw as fast as
+        // a core allows. So frames are also held to the display's refresh rate by the clock.
+        int refreshHz = 60;
+        if (const GLFWvidmode* vm = glfwGetVideoMode(glfwGetPrimaryMonitor()))
+            if (vm->refreshRate > 0) refreshHz = vm->refreshRate;
+        const auto minFrame = std::chrono::duration<double>(1.0 / std::clamp(refreshHz, 30, 360));
+        auto lastFrame = std::chrono::steady_clock::now();
         while (!glfwWindowShouldClose(window)) {
             // Sleep while idle. Animations (scrolling, hovers, toasts) draw every frame at the display's
             // refresh rate (vsync paces the loop); background work alone only needs ~30 updates a second.
-            if (settleFrames > 0 || kzgui::animating()) glfwPollEvents();
+            bool hidden = glfwGetWindowAttrib(window, GLFW_ICONIFIED) != 0;
+            if (hidden) glfwWaitEventsTimeout(app.busy() ? 0.25 : 0.5);
+            else if (settleFrames > 0 || kzgui::animating()) glfwPollEvents();
             else if (app.busy()) glfwWaitEventsTimeout(1.0 / 30.0);
             else glfwWaitEventsTimeout(0.5);
+            auto since = std::chrono::steady_clock::now() - lastFrame;
+            if (since < minFrame) std::this_thread::sleep_for(minFrame - since);
+            lastFrame = std::chrono::steady_clock::now();
             renderFrame();
             app.afterFrame();
             if (unsettled()) settleFrames = 3;
             else if (settleFrames > 0) --settleFrames;
         }
         glfwSetWindowRefreshCallback(window, nullptr);
+        kzgui::native::setRedraw(nullptr);
         g_render = nullptr;
         g_app = nullptr;
     }

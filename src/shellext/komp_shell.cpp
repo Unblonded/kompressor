@@ -14,6 +14,7 @@
 
 #include <cstring>
 #include <cwctype>
+#include <iterator>
 #include <new>
 #include <string>
 #include <vector>
@@ -105,19 +106,39 @@ bool isArchiveByContent(const std::wstring& path) {
     std::vector<uint8_t> buf(kz::kSniffBytes);
     DWORD got = 0;
     BOOL ok = ReadFile(f, buf.data(), (DWORD)buf.size(), &got, nullptr);
+    bool found = ok && (bool)kz::sniff(buf.data(), got);
+    LARGE_INTEGER size{};
+    if (ok && !found && GetFileSizeEx(f, &size)) {
+        // A self-extracting program: the archive comes after the program itself.
+        found = (bool)kz::sniffSfx(buf.data(), got, (uint64_t)size.QuadPart, [&](uint64_t off, uint8_t* dst, size_t n) -> size_t {
+            LARGE_INTEGER at;
+            at.QuadPart = (LONGLONG)off;
+            DWORD read = 0;
+            if (!SetFilePointerEx(f, at, nullptr, FILE_BEGIN) || !ReadFile(f, dst, (DWORD)n, &read, nullptr)) return 0;
+            return read;
+        });
+    }
     CloseHandle(f);
-    return ok && (bool)kz::sniff(buf.data(), got);
+    return found;
 }
 
-bool isArchiveName(const std::wstring& path) {
+bool hasExt(const std::wstring& path, const char* const* exts, size_t count) {
     size_t slash = path.find_last_of(L"\\/"), dot = path.find_last_of(L'.');
     if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return false;
     std::wstring ext = lower(path.substr(dot + 1));
-    for (const char* e : kompshell::kArchiveExts) {
-        std::wstring w(e, e + strlen(e));
+    for (size_t i = 0; i < count; ++i) {
+        std::wstring w(exts[i], exts[i] + strlen(exts[i]));
         if (w == ext) return true;
     }
     return false;
+}
+
+bool isArchiveName(const std::wstring& path) {
+    return hasExt(path, kompshell::kArchiveExts, std::size(kompshell::kArchiveExts));
+}
+
+bool isContainerName(const std::wstring& path) {
+    return hasExt(path, kompshell::kContainerExts, std::size(kompshell::kContainerExts));
 }
 
 // Kompressor.exe: recorded by the app when it registers this handler, else next to this DLL.
@@ -216,13 +237,16 @@ public:
         // Archives get Open / Extract on top; a selection with anything else only gets the compress entries.
         // A file counts by its name or, for up to 32 selected items (so right-clicking stays instant), by its
         // content: a misnamed archive still gets Open / Extract.
-        archives_ = !paths_.empty();
+        // Programs and installers get "Open archive" alone (to look inside them).
+        archives_ = openable_ = !paths_.empty();
         bool readContent = paths_.size() <= 32;
         for (auto& p : paths_) {
             DWORD a = GetFileAttributesW(p.c_str());
             bool dir = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-            if (dir || !(isArchiveName(p) || (readContent && isArchiveByContent(p)))) {
-                archives_ = false;
+            bool archive = !dir && (isArchiveName(p) || (readContent && isArchiveByContent(p)));
+            if (!archive) archives_ = false;
+            if (!archive && (dir || !isContainerName(p))) {
+                openable_ = false;
                 break;
             }
         }
@@ -247,6 +271,9 @@ public:
             add(CHere, L"Extract here");
             add(CTo, one ? L"Extract to \"" + menuText(extractStem(paths_[0])) + L"\\\"" : L"Extract to \"*\\\"");
             add(CTest, L"Test archive");
+            AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+        } else if (openable_) {
+            add(COpen, L"Open archive");
             AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
         }
         std::wstring stem = menuText(addStem(paths_));
@@ -290,6 +317,7 @@ private:
     LONG ref_ = 1;
     std::vector<std::wstring> paths_;
     bool archives_ = false;
+    bool openable_ = false;  // every item is an archive, a program or an installer
     std::vector<Cmd> cmds_;  // menu id offset -> command
 };
 

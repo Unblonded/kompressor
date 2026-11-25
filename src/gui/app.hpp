@@ -34,6 +34,7 @@ struct Job {
     std::function<void(Job&)> onDone;
     double started = 0.0;
     bool visible = true;  // listed in the activity panel
+    bool controls = true;  // with pause and cancel buttons
     // Pausing (the flag the worker waits on is prog->paused). Elapsed time leaves paused stretches out.
     double pausedSince = 0.0, pausedTotal = 0.0;
     bool paused() const { return prog->paused.load(); }
@@ -44,6 +45,38 @@ struct Job {
         prog->paused = on;
     }
     double elapsed(double now) const { return (paused() ? pausedSince : now) - started - pausedTotal; }
+
+    // Speed of the work, in bytes of input per second: measured once a second and smoothed over
+    // roughly the last ten, so a stretch of slow blocks shows up without the number jumping about.
+    double rate = 0.0;
+    int rateSamples = 0;
+    double rateT = -1.0, rateBytes = 0.0;
+    void sampleRate(double now) {
+        if (paused() || prog->total.load() == 0) {
+            rateT = -1.0;  // start a fresh measurement on resume
+            return;
+        }
+        double bytes = (double)prog->fraction() * (double)prog->total.load();
+        if (rateT < 0) {
+            rateT = now;
+            rateBytes = bytes;
+            return;
+        }
+        double dt = now - rateT;
+        if (dt < 1.0) return;
+        double r = bytes > rateBytes ? (bytes - rateBytes) / dt : 0.0;
+        rate = rateSamples == 0 ? r : rate * 0.9 + r * 0.1;
+        rateSamples++;
+        rateT = now;
+        rateBytes = bytes;
+    }
+    // Seconds left at the current speed, or -1 while there is no fair estimate yet.
+    double secondsLeft() const {
+        uint64_t t = prog->total.load();
+        if (t == 0 || rateSamples < 3 || rate <= 1.0) return -1.0;
+        double left = (1.0 - (double)prog->fraction()) * (double)t / rate;
+        return left < 0 ? 0 : left;
+    }
 };
 
 struct Node {
@@ -165,6 +198,11 @@ private:
     void drawConfirmPopup();
     int pendingDrag_ = -1;   // tab whose selection starts dragging out after this frame
     bool dragging_ = false;  // a drag out is running
+    // A drag out shows in the activity panel once the files are released over a target and their
+    // extraction starts (on a worker thread, so the UI thread makes the row visible).
+    Job* dropJob_ = nullptr;
+    std::atomic<bool> dropStarted_{false};
+    void syncDropJob();
     int dropTab_ = -1;       // tab whose file area was drawn last frame...
     ImVec2 dropMin_, dropMax_;  // ...and where (screen coordinates)
 
@@ -189,6 +227,8 @@ private:
     void actionOpen();
     void actionExtract(ExplorerTab& t, bool selectionOnly);
     void actionTest(ExplorerTab& t);
+    // Opens the tab's archive in Windows File Explorer, or shows it there when Explorer can't browse it.
+    void openInExplorer(ExplorerTab& t);
     void actionConvert(ExplorerTab& t, bool super = false);  // recompress into another format
     void askPassword(const std::string& prompt, std::function<void(const std::string&)> onOk);
     void runExtract(int tabId, kz::ExtractOptions o, bool reveal);

@@ -154,6 +154,21 @@ void statTile(const char* label, const std::string& value, Ico ic, const ImVec4&
     ImGui::Dummy(ImVec2(w, b.y - a.y));
 }
 
+// "about 1h 20m left", rounded the way a person would say it (the estimate is rough anyway).
+std::string timeLeftText(double s) {
+    char buf[48];
+    if (s < 60) return "under a minute left";
+    if (s < 3600) {
+        std::snprintf(buf, sizeof buf, "about %dm left", (int)std::lround(s / 60.0));
+    } else if (s < 100 * 3600) {
+        int m = (int)std::lround(s / 60.0);
+        std::snprintf(buf, sizeof buf, "about %dh %02dm left", m / 60, m % 60);
+    } else {
+        return "many hours left";
+    }
+    return buf;
+}
+
 std::string clockTime(double t) {
     std::time_t tt = (std::time_t)t;
     std::tm tm{};
@@ -186,6 +201,7 @@ const char* kMod = "Ctrl";
 // ============================================================================ frame
 void App::frame() {
     pumpJobs();
+    syncDropJob();
     updateBoost();
     dropTab_ = -1;  // set again by the archive view drawn this frame
     if (quitWhenDone_ && directJobs_ == 0 && !directFailed_) glfwSetWindowShouldClose(window_, 1);
@@ -394,7 +410,13 @@ void App::drawMenuBar() {
         if (ImGui::MenuItem("Recompress As...")) actionConvert(*at);
         if (ImGui::MenuItem("Super Compress to .kmp...")) actionConvert(*at, true);
         if (ImGui::MenuItem("Reload")) loadTab(at->id);
-        if (!at->src.inMemory() && ImGui::MenuItem("Show in File Manager")) reveal(at->src.path);
+        if (!at->src.inMemory()) {
+#ifdef _WIN32
+            if (ImGui::MenuItem("Open in File Explorer")) openInExplorer(*at);
+            ImGui::SetItemTooltip("Browse this archive in Windows File Explorer (for the kinds Explorer can open)");
+#endif
+            if (ImGui::MenuItem("Show in File Manager")) reveal(at->src.path);
+        }
         ImGui::EndMenu();
     }
     ImGui::PushStyleColor(ImGuiCol_Text, mix(col::Dim, col::Text, 0.4f));
@@ -937,6 +959,19 @@ void App::drawExplorer(ExplorerTab& t) {
     drawPreview(t);
 }
 
+// The file list clears the highlight colours so it can draw its own rounded row highlight. Its
+// right-click menus would inherit that and show no hover, so they put the theme's colours back.
+// ImGui wants them popped inside the popup, before EndPopup().
+static void pushListMenuColors() {
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(col::Accent.x, col::Accent.y, col::Accent.z, 0.22f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(col::Text.x, col::Text.y, col::Text.z, 0.05f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(col::Accent.x, col::Accent.y, col::Accent.z, 0.30f));
+}
+static void endListMenu() {
+    ImGui::PopStyleColor(3);
+    ImGui::EndPopup();
+}
+
 void App::drawTable(ExplorerTab& t, float width) {
     const float em = emPx();
     const float rowH = em * 1.95f;
@@ -1056,6 +1091,7 @@ void App::drawTable(ExplorerTab& t, float width) {
                 dl->PopClipRect();
             }
             if (ImGui::BeginPopupContextItem("##ctx")) {
+                pushListMenuColors();
                 if (!sel) t.selection = {id};
                 if (n.isDir && ImGui::MenuItem("Open folder")) openDir = id;
                 if (!n.isDir && ImGui::MenuItem("Open")) openEntry(t, id);
@@ -1069,7 +1105,7 @@ void App::drawTable(ExplorerTab& t, float width) {
                 if (!t.editable && !t.editWhy.empty()) ImGui::SetItemTooltip("%s", t.editWhy.c_str());
                 ImGui::Separator();
                 if (ImGui::MenuItem("Copy path")) ImGui::SetClipboardText(n.path.c_str());
-                ImGui::EndPopup();
+                endListMenu();
             }
             Ico ic = iconFor(n);
             float is = em * 1.2f;
@@ -1115,6 +1151,7 @@ void App::drawTable(ExplorerTab& t, float width) {
     if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
         ImGui::OpenPopup("##bgctx");
     if (ImGui::BeginPopup("##bgctx")) {
+        pushListMenuColors();
         bool canEdit = t.editable && !t.editing;
         if (ImGui::MenuItem("Add Files...", nullptr, false, canEdit)) pickFilesToAdd(t, false);
         if (ImGui::MenuItem("Add Folder...", nullptr, false, canEdit)) pickFilesToAdd(t, true);
@@ -1131,7 +1168,13 @@ void App::drawTable(ExplorerTab& t, float width) {
         ImGui::Separator();
         if (ImGui::MenuItem("Select All", (std::string(kMod) + "+A").c_str()))
             t.selection = std::set<int>(t.rows.begin(), t.rows.end());
-        ImGui::EndPopup();
+#ifdef _WIN32
+        if (!t.src.inMemory()) {
+            ImGui::Separator();
+            if (ImGui::MenuItem("Open in File Explorer")) openInExplorer(t);
+        }
+#endif
+        endListMenu();
     }
     ImGui::EndTable();
     ImGui::PopStyleColor(4);
@@ -1523,6 +1566,12 @@ void App::drawActivity() {
         bool paused = j.paused();
         std::string st = paused ? "Paused - resume to continue" : j.prog->status();
         double el = j.elapsed(ImGui::GetTime());
+        j.sampleRate(ImGui::GetTime());
+        double left = paused ? -1.0 : j.secondsLeft();
+        if (!paused && det && j.rateSamples >= 3) {  // speed after the status, so a slow stretch reads as working
+            std::string sp = j.rate < 1024.0 ? "under 1 KB/s" : kz::humanSize((uint64_t)j.rate) + "/s";
+            st = st.empty() ? sp : st + "  -  " + sp;
+        }
         float avail = ImGui::GetContentRegionAvail().x;
         if (paused) icon(Ico::Pause, em * 1.1f, col::Warn);
         else spinner(em * 0.55f, col::Teal);
@@ -1532,8 +1581,11 @@ void App::drawActivity() {
         ImGui::TextUnformatted(j.title.c_str());
         ImGui::PopFont();
         ImGui::SameLine(0, em * 0.6f);
-        char ov[64];
-        if (det) std::snprintf(ov, sizeof ov, "%.0f%%  -  %s", f * 100.0f, kz::formatDuration(el).c_str());
+        char ov[160];
+        if (det && left >= 0)
+            std::snprintf(ov, sizeof ov, "%.0f%%  -  %s  -  %s", f * 100.0f, kz::formatDuration(el).c_str(),
+                          timeLeftText(left).c_str());
+        else if (det) std::snprintf(ov, sizeof ov, "%.0f%%  -  %s", f * 100.0f, kz::formatDuration(el).c_str());
         else std::snprintf(ov, sizeof ov, "%s", kz::formatDuration(el).c_str());
         ImGui::TextColored(col::Dim, "%s", ov);
         progressBar(det ? f : (paused ? 0.0f : -1.0f), ImVec2(avail - em * 6.5f, em * 0.36f), paused ? col::Warn : col::Accent);
@@ -1543,13 +1595,15 @@ void App::drawActivity() {
             ImGui::PopFont();
         }
         ImGui::EndGroup();
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - em * 3.9f);
-        if (iconButton("##pause", paused ? Ico::Play : Ico::Pause, em * 1.8f, paused ? "Resume" : "Pause"))
-            j.setPaused(!paused, ImGui::GetTime());
-        ImGui::SameLine(0, em * 0.2f);
-        if (iconButton("##cancel", Ico::Close, em * 1.8f, "Cancel")) {
-            j.prog->cancel = true;  // also wakes a paused worker so it can stop
-            j.setPaused(false, ImGui::GetTime());
+        if (j.controls) {
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - em * 3.9f);
+            if (iconButton("##pause", paused ? Ico::Play : Ico::Pause, em * 1.8f, paused ? "Resume" : "Pause"))
+                j.setPaused(!paused, ImGui::GetTime());
+            ImGui::SameLine(0, em * 0.2f);
+            if (iconButton("##cancel", Ico::Close, em * 1.8f, "Cancel")) {
+                j.prog->cancel = true;  // also wakes a paused worker so it can stop
+                j.setPaused(false, ImGui::GetTime());
+            }
         }
         ImGui::PopID();
         ImGui::Dummy(ImVec2(0, em * 0.2f));
