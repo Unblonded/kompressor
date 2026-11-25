@@ -77,6 +77,7 @@ add_library(kompressor_core STATIC
   src/core/kz_archive.cpp
   src/core/kz_hash.cpp
   src/core/kz_search.cpp
+  src/core/kz_ramdrive.cpp
   src/core/kz_writer.cpp
   src/core/kmp.cpp
   src/core/kz_parallel.cpp
@@ -122,7 +123,7 @@ endif()
 target_compile_definitions(kompressor_core PUBLIC KZ_VERSION="${PROJECT_VERSION}")
 if(WIN32)
   target_compile_definitions(kompressor_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
-  target_link_libraries(kompressor_core PUBLIC shell32 powrprof ole32)
+  target_link_libraries(kompressor_core PUBLIC shell32 powrprof ole32 advapi32 virtdisk)
 endif()
 if(MSVC)
   target_compile_options(kompressor_core PUBLIC /utf-8 /W3)
@@ -195,6 +196,7 @@ if(KOMPRESSOR_BUILD_GUI)
     src/gui/app_files.cpp
     src/gui/app_hash.cpp
     src/gui/app_search.cpp
+    src/gui/app_ramdrive.cpp
     src/gui/app_icon.cpp
     src/gui/file_dialog.cpp
     src/gui/native_files.cpp
@@ -220,7 +222,7 @@ if(KOMPRESSOR_BUILD_GUI)
       # The .rc embeds our own manifest (DPI awareness, UTF-8 code page, long paths).
       target_link_options(Kompressor PRIVATE /ENTRY:mainCRTStartup /MANIFEST:NO)
     endif()
-    target_link_libraries(Kompressor PRIVATE dwmapi)  # custom title bar: shadow, dark/rounded frame
+    target_link_libraries(Kompressor PRIVATE dwmapi winmm)  # custom title bar: shadow, dark/rounded frame
     # Explorer context-menu handler: puts "Komp" next to 7-Zip's entry (static verbs can only go top/bottom).
     add_library(KompShell SHARED src/shellext/komp_shell.cpp src/shellext/komp_shell.def)
     target_compile_definitions(KompShell PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)

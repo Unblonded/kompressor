@@ -10,6 +10,8 @@
 #include <OpenGL/gl3.h>
 #elif defined(_WIN32)
 #include <windows.h>
+#include <timeapi.h>
+#include <dwmapi.h>
 #include <GL/gl.h>
 #else
 #include <GL/gl.h>
@@ -32,6 +34,7 @@
 #include "kmp.hpp"
 #include "kz_archive.hpp"
 #include "kz_perf.hpp"
+#include "kz_ramdrive.hpp"
 #include "native_files.hpp"
 #include "theme.hpp"
 #include "window_frame.hpp"
@@ -149,6 +152,7 @@ float applyUiScale(float xs, ImFont** mono) {
 int main(int argc, char** argv) {
     kz::initLocale();
     std::vector<std::string> args = kz::utf8Args(argc, argv);
+    if (int rc = kz::RamDrive::helperMain(args); rc >= 0) return rc;  // the elevated RAM drive helper (Windows)
     // Debug aid: "--snapshot out.ppm" renders ~3 s of frames, saves the framebuffer and exits.
     std::string snapshotPath, snapshotSelect;
     for (size_t i = 1; i + 1 < args.size(); ++i)
@@ -207,6 +211,13 @@ int main(int argc, char** argv) {
             args.erase(args.begin() + i, args.begin() + i + 2);
             break;
         }
+    int debugRam = 0;  // 1 open the RAM Drive window, 2 also start a drive (not mounted)
+    for (size_t i = 1; i < args.size(); ++i)
+        if (args[i] == "--debug-ram" || args[i] == "--debug-ram-run") {
+            debugRam = args[i] == "--debug-ram" ? 1 : 2;
+            args.erase(args.begin() + i);
+            break;
+        }
     std::string shellAction;
     std::vector<std::string> shellPaths;
     if (args.size() >= 3 && args[1] == "--shell") {
@@ -256,7 +267,14 @@ int main(int argc, char** argv) {
         return 1;
     }
     glfwMakeContextCurrent(window);
+#ifdef _WIN32
+    // In a window, the desktop compositor shows frames at the monitor's refresh rate. GL's own vsync
+    // there drifts against it and skips frames (138 fps on a 155 Hz screen), so frames are paced by
+    // waiting for each composition pass instead (DwmFlush after the swap).
+    glfwSwapInterval(0);
+#else
     glfwSwapInterval(1);
+#endif
     glfwSetWindowSizeLimits(window, 760, 480, GLFW_DONT_CARE, GLFW_DONT_CARE);
     kzgui::setWindowIcon(window);
     kzgui::frame::install(window);  // custom title bar (Windows)
@@ -309,6 +327,7 @@ int main(int argc, char** argv) {
         if (debugRecompress) app.debugRecompress();
         if (debugHash) app.debugHash(debugHashList);
         if (!debugSearch.empty()) app.debugSearch(debugSearch);
+        if (debugRam) app.debugRam(debugRam == 2);
 
         // Files passed on the command line / "Open with": archives open, anything else is queued to compress.
         std::vector<std::string> toCompress;
@@ -393,6 +412,9 @@ int main(int argc, char** argv) {
                 glfwMakeContextCurrent(window);
             }
             glfwSwapBuffers(window);
+#ifdef _WIN32
+            DwmFlush();
+#endif
             inFrame = false;
         };
         g_render = renderFrame;
@@ -413,30 +435,70 @@ int main(int argc, char** argv) {
             return false;
         };
         int settleFrames = 0;
-        // Vsync paces the loop only while the window is on screen: covered or minimized, Windows
-        // returns from SwapBuffers at once and an animation (the job spinner) would redraw as fast as
-        // a core allows. So frames are also held to the display's refresh rate by the clock.
-        int refreshHz = 60;
-        if (const GLFWvidmode* vm = glfwGetVideoMode(glfwGetPrimaryMonitor()))
-            if (vm->refreshRate > 0) refreshHz = vm->refreshRate;
-        const auto minFrame = std::chrono::duration<double>(1.0 / std::clamp(refreshHz, 30, 360));
-        auto lastFrame = std::chrono::steady_clock::now();
+        // Vsync paces the loop while the window is on screen. Covered or minimized, Windows returns from
+        // SwapBuffers at once and an animation (the job spinner) would redraw as fast as a core allows, so
+        // a frame that came back far too early is held to the refresh rate by the clock instead. Only then:
+        // sleeping on top of vsync would miss vblanks and drop the frame rate.
+        // The refresh rate is the one of the monitor the window is on (checked twice a second).
+        auto windowRefresh = [&]() -> int {
+            int wx, wy, ww, wh, n = 0, best = 0, hz = 60;
+            glfwGetWindowPos(window, &wx, &wy);
+            glfwGetWindowSize(window, &ww, &wh);
+            GLFWmonitor** mons = glfwGetMonitors(&n);
+            for (int i = 0; i < n; ++i) {
+                const GLFWvidmode* vm = glfwGetVideoMode(mons[i]);
+                if (!vm) continue;
+                int mx, my;
+                glfwGetMonitorPos(mons[i], &mx, &my);
+                int ox = std::max(0, std::min(wx + ww, mx + vm->width) - std::max(wx, mx));
+                int oy = std::max(0, std::min(wy + wh, my + vm->height) - std::max(wy, my));
+                if (ox * oy > best && vm->refreshRate > 0) best = ox * oy, hz = vm->refreshRate;
+            }
+            return std::clamp(hz, 30, 500);
+        };
+#ifdef _WIN32
+        timeBeginPeriod(1);  // sleeps accurate to ~1 ms (the default is ~15 ms)
+#endif
+        auto minFrame = std::chrono::duration<double>(1.0 / windowRefresh());
+        auto lastFrame = std::chrono::steady_clock::now(), lastRefreshCheck = lastFrame;
         while (!glfwWindowShouldClose(window)) {
-            // Sleep while idle. Animations (scrolling, hovers, toasts) draw every frame at the display's
-            // refresh rate (vsync paces the loop); background work alone only needs ~30 updates a second.
+            // Sleep while idle. Animations (scrolling, hovers, toasts) and running jobs draw every frame
+            // at the display's refresh rate.
             bool hidden = glfwGetWindowAttrib(window, GLFW_ICONIFIED) != 0;
             if (hidden) glfwWaitEventsTimeout(app.busy() ? 0.25 : 0.5);
-            else if (settleFrames > 0 || kzgui::animating()) glfwPollEvents();
-            else if (app.busy()) glfwWaitEventsTimeout(1.0 / 30.0);
+            else if (settleFrames > 0 || kzgui::animating() || app.busy() || std::getenv("KZ_FPS_LOG")) glfwPollEvents();
             else glfwWaitEventsTimeout(0.5);
-            auto since = std::chrono::steady_clock::now() - lastFrame;
-            if (since < minFrame) std::this_thread::sleep_for(minFrame - since);
+            auto now = std::chrono::steady_clock::now();
+            if (now - lastRefreshCheck > std::chrono::milliseconds(500)) {
+                minFrame = std::chrono::duration<double>(1.0 / windowRefresh());
+                lastRefreshCheck = now;
+            }
+            auto since = now - lastFrame;
+            if (hidden || since < minFrame * 0.5) {
+                if (since < minFrame) std::this_thread::sleep_for(minFrame - since);
+            }
             lastFrame = std::chrono::steady_clock::now();
+            if (static const char* fpsLog = std::getenv("KZ_FPS_LOG")) {  // debug aid: frames per second to a file
+                static int frames = 0;
+                static auto t0 = lastFrame;
+                ++frames;
+                if (lastFrame - t0 >= std::chrono::seconds(1)) {
+                    if (FILE* f = std::fopen(fpsLog, "a")) {
+                        std::fprintf(f, "%d fps (display %.0f Hz)\n", frames, 1.0 / minFrame.count());
+                        std::fclose(f);
+                    }
+                    frames = 0;
+                    t0 = lastFrame;
+                }
+            }
             renderFrame();
             app.afterFrame();
             if (unsettled()) settleFrames = 3;
             else if (settleFrames > 0) --settleFrames;
         }
+#ifdef _WIN32
+        timeEndPeriod(1);
+#endif
         glfwSetWindowRefreshCallback(window, nullptr);
         kzgui::native::setRedraw(nullptr);
         g_render = nullptr;

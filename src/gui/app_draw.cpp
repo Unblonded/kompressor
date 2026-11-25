@@ -309,6 +309,7 @@ void App::frame() {
     drawFormats();
     drawHashWindow();
     drawSearchWindow();
+    drawRamDriveWindow();
     drawAbout();
     drawSettings();
     drawPasswordPopup();
@@ -383,6 +384,9 @@ void App::drawMenuBar() {
         if (ImGui::MenuItem("Open Archive...", kO.c_str())) actionOpen();
         if (ImGui::MenuItem("New Archive...", kN.c_str())) openCompressDialog({}, false);
         if (ImGui::MenuItem("Super Compress...", kSN.c_str())) openCompressDialog({}, true);
+        ImGui::Separator();
+        if (ImGui::MenuItem("RAM Drive...", nullptr, !ram_.busy && ram_.drive != nullptr)) openRamDrive();
+        ImGui::SetItemTooltip("A drive kept in memory, for fast scratch files; emptied when it stops");
         ImGui::Separator();
         if (ImGui::MenuItem("Close Tab", kW.c_str(), false, at != nullptr)) closeTab(activeTab_);
         ImGui::Separator();

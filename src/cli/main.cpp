@@ -19,6 +19,8 @@
 #include "kz_hash.hpp"
 #include "kz_search.hpp"
 #include "kz_perf.hpp"
+#include "kz_ramdrive.hpp"
+#include <csignal>
 
 #ifdef _WIN32
 #include <io.h>
@@ -49,6 +51,8 @@ static void usage() {
         "  kompressor-cli add     <archive> <files/folders...> [-d folder] [-p password]   (add or replace entries)\n"
         "  kompressor-cli delete  <archive> <entry...> [-p password]   (remove entries and folders)\n"
         "  kompressor-cli advise  <files/folders...>   (which format suits these files, for each goal)\n"
+        "  kompressor-cli ramdrive [--size 2g] [--letter R]\n"
+        "                         (a scratch drive until Ctrl+C; everything on it is deleted then)\n"
         "  kompressor-cli formats\n\n"
         "  create, super and convert also take -v <size> to split the result into parts (e.g. -v 100m, -v 4g)\n"
         "  --max-cpu   maximum performance: every core at high priority, no power throttling, fastest power plan\n"
@@ -115,6 +119,7 @@ static kmp::Mode parseMode(const std::string& s) {
 int main(int argc, char** argv) {
     initLocale();
     std::vector<std::string> args = utf8Args(argc, argv);
+    if (int rc = RamDrive::helperMain(args); rc >= 0) return rc;  // the elevated RAM drive helper (Windows)
     if (args.size() < 2) {
         usage();
         return 1;
@@ -125,7 +130,8 @@ int main(int argc, char** argv) {
     int level = -1, threads = 0;
     uint64_t volumeSize = 0;
     bool skipExisting = false, dedup = true, maxCpu = false, useGpu = false, matchCase = false, hexSearch = false;
-    std::string names;
+    std::string names, ramSize = "1g";
+    char letter = 'R';
     for (size_t i = 2; i < args.size(); ++i) {
         const std::string& a = args[i];
         auto next = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : std::string(); };
@@ -141,6 +147,8 @@ int main(int argc, char** argv) {
         else if (a == "--case") matchCase = true;
         else if (a == "--hex") hexSearch = true;
         else if (a == "--names") names = next();
+        else if (a == "--size") ramSize = next();
+        else if (a == "--letter") { std::string l = next(); letter = l.empty() ? 'R' : l[0]; }
         else if (a == "-v") {
             std::string v = next();
             volumeSize = parseSize(v);
@@ -200,6 +208,28 @@ int main(int argc, char** argv) {
                     std::chrono::duration<double>(t1 - t0).count(), std::chrono::duration<double>(t2 - t1).count(),
                     ok ? "ok" : "MISMATCH");
         return ok ? 0 : 2;
+    }
+
+    if (cmd == "ramdrive" || cmd == "ram") {
+        uint64_t cap = parseSize(ramSize);
+        if (!cap) {
+            std::fprintf(stderr, "error: bad size '%s' (try --size 512m or --size 4g)\n", ramSize.c_str());
+            return 1;
+        }
+        if (RamDrive::needsAdmin()) std::printf("Making %s needs administrator approval...\n", RamDrive::kind());
+        std::fflush(stdout);
+        RamDrive drive;
+        if (!drive.start(cap, letter, err)) return std::fprintf(stderr, "error: %s\n", err.c_str()), 1;
+        std::printf("RAM drive: %s, %s, at %s\n", humanSize(drive.capacity()).c_str(), RamDrive::kind(), drive.where().c_str());
+        std::printf("Press Ctrl+C to stop. Everything on the drive is deleted then.\n");
+        std::fflush(stdout);
+        static std::atomic<bool> quit{false};
+        std::signal(SIGINT, [](int) { quit = true; });
+        std::signal(SIGTERM, [](int) { quit = true; });
+        while (!quit) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::printf("\nstopping: %s freed\n", humanSize(drive.used()).c_str());
+        drive.stop();
+        return 0;
     }
 
     if (cmd == "formats") {

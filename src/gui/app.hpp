@@ -17,6 +17,7 @@
 #include "file_dialog.hpp"
 #include "kz_hash.hpp"
 #include "kz_search.hpp"
+#include "kz_ramdrive.hpp"
 #include "kz_advisor.hpp"
 #include "kz_archive.hpp"
 
@@ -168,6 +169,7 @@ public:
     // Debug aid: open Find in Files once the active archive has loaded and search it for `text`.
     // (then shows the first file's last listed hit, as a click on it would).
     void debugSearch(const std::string& text) { debugSearch_ = text, debugSearchJump_ = true; }
+    void debugRam(bool run);
     bool busy() const;
     // Debug aid for --snapshot: navigate to and preview an entry once the active tab has loaded.
     void debugSelect(const std::string& entryPath) { debugSelect_ = entryPath; }
@@ -252,6 +254,10 @@ private:
     void runSearch();
     void showSearchHit(const kz::FileHits& f, const kz::SearchHit* h);
     void drawSearchWindow();
+    // RAM Drive window (app_ramdrive.cpp): a scratch drive that's deleted when it stops.
+    void openRamDrive();
+    void drawRamDriveWindow();
+    void ramRun(const char* busyText, std::function<std::string()> work);
     // Opens the tab's archive in Windows File Explorer, or shows it there when Explorer can't browse it.
     void openInExplorer(ExplorerTab& t);
     void actionConvert(ExplorerTab& t, bool super = false);  // recompress into another format
@@ -388,6 +394,23 @@ private:
         bool done = false;
         std::set<std::string> collapsed;
     } search_;
+    struct RamState {
+        bool open = false, focus = false;
+        int size = 2;            // index into the size choices
+        int customMb = 4096;
+        int letter = 0;          // index into the free drive letters (Windows)
+        std::unique_ptr<kz::RamDrive> drive;
+        // Starting and stopping wait on other programs (and on Windows an administrator prompt), so
+        // they run here; the window only reads `drive` while nothing is running.
+        std::thread worker;
+        std::atomic<bool> busy{false};
+        std::string busyText;
+        std::mutex mu;           // guards `error`
+        std::string error;
+        ~RamState() {
+            if (worker.joinable()) worker.join();
+        }
+    } ram_;
     void drawSplitOption(bool* on, int* preset, int* customMb, float inner);
     // "Recommended for you": goal picker, the suggested format with its reasons and estimates, and a button
     // that applies it. Returns true when the user clicked "Use this" (`out` holds the recommendation).

@@ -12,6 +12,7 @@ A cross-platform (Windows · macOS · Linux) file compressor written in C++17 wi
 * Integrity **Test**, password prompts, background jobs you can **pause**, resume or cancel, drag & drop.
 * **Maximum performance** mode (Settings, or `--max-cpu` in the CLI): while a job runs it gets every core at high priority, Windows power throttling off, the fastest power plan (yours comes back afterwards) and no sleep.
 * **Graphics card help** for ZIP (Settings, or `--gpu` in the CLI; Windows): the graphics card searches for repeated data alongside the CPU through Direct3D 11 compute shaders, which come with Windows. It takes only the pieces it will finish before the CPU would get to them, so it never slows a job down. The result is an ordinary ZIP about the same size.
+* **RAM Drive** (File > RAM Drive, or `kompressor-cli ramdrive`): a fast scratch drive that cleans itself up. On Windows it's a local NTFS drive (e.g. R:, under "Devices and drives") on a temporary virtual disk made with Windows' own VHDX support; making it asks for administrator approval once, and the disk is removed and its file deleted when the drive stops or Kompressor exits, even if Kompressor crashes. On macOS it's a real RAM disk (`hdiutil ram://`) in Finder; on Linux a folder in `/dev/shm`, which is memory. No driver or other software is installed.
 * A scriptable `kompressor-cli` built from the same core.
 
 ## The KMP super format
@@ -113,6 +114,7 @@ kompressor-cli convert <any-archive> out.7z|.zip|.tar.zst|.kmp|... [-l level] [-
 kompressor-cli add     <archive> <files/folders> [-d folder-in-archive] [-p pw]   # add or replace entries
 kompressor-cli delete  <archive> <entry...> [-p pw]                               # remove entries / folders
 kompressor-cli advise  <files/folders>               # which format suits these files, for each goal
+kompressor-cli ramdrive [--size 2g] [--letter R]   # a scratch drive until Ctrl+C
 kompressor-cli formats
 
 # create, super and convert take -v <size> to split the output into .001, .002 ... parts
@@ -123,8 +125,10 @@ kompressor-cli create backup.7z ~/Photos -v 4g
 ## Regression tests
 
 ```
-powershell -File testsun.ps1 -Generate   # build the samples, then check them
-powershell -File testsun.ps1             # check again (after a code change)
+powershell -File tests
+un.ps1 -Generate   # build the samples, then check them
+powershell -File tests
+un.ps1             # check again (after a code change)
 ```
 
 `tests/make-samples.ps1` writes a fixed corpus of files and packs it with every writer the PC has (Python, .NET, Windows' tar, makecab, Windows disc imaging, Kompressor itself and 7-Zip when installed); missing writers are skipped. `tests/run.ps1` opens each sample with `kompressor-cli hash` and checks every file inside against Windows' own SHA-256 of the corpus, as `tests/samples.tsv` describes. The few formats with no independent reference are checked against `tests/baselines/`, which `-Update` rewrites. The exit code is the number of failures.
@@ -143,5 +147,6 @@ tests/      regression samples and runner
 
 * RAR files are created as genuine RAR5 archives with stored (uncompressed) data, written from RARLAB's published format description; RAR's compression algorithm is proprietary, so it is not used. 7-Zip archives with *encrypted headers* are not supported by libarchive. Encrypted ZIPs work both ways.
 * Adding to or deleting from an archive rewrites the whole archive (every entry is recompressed), so it takes about as long as recompressing it. A RAR comes back stored, single-file formats (GZ, XZ, ...), split sets and archives nested inside other archives can't be edited, and encrypted 7z/RAR archives can't be written back. Files opened from an archive are temporary copies in `%TEMP%\Kompressor` (cleaned up after a day); edits to them don't go back into the archive. Dragging and copying files out is Windows-only for now.
+* The Windows RAM drive's files are kept in a temporary file in `%TEMP%\Kompressor` that Windows caches in memory, not in memory alone: a true RAM disk on Windows needs a kernel driver, which would have to be third-party or signed by Microsoft. On Linux the drive is limited by `/dev/shm` (usually half the memory), not by a size you pick.
 * Extraction is hardened against path traversal: `..` entries, absolute paths and paths that resolve through symlinks are refused.
-* Debug aid: `Kompressor --snapshot out.ppm [--select entry/path] archive` renders the UI, saves a frame and exits.
+* Debug aid: `Kompressor --snapshot out.ppm [--select entry/path] archive` renders the UI, saves a frame and exits. `KZ_FPS_LOG=fps.txt` redraws continuously and logs the frame rate each second.
