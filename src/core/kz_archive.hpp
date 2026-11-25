@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -59,6 +60,16 @@ bool readEntry(const Source& src, const std::string& entryPath, const std::strin
                std::vector<uint8_t>& out, bool& truncated, Progress& prog, std::string& err);
 // Decompresses everything and validates checksums without writing to disk.
 bool testArchive(const Source& src, const std::string& password, Progress& prog, std::string& err);
+
+// Streams the contents of every file in an archive, in archive order. begin() decides whether the
+// entry is wanted; data() gets its bytes in pieces (false stops everything); end() reports whether the
+// entry read completely. Returns false when the archive can't be opened, or on cancel.
+struct EntryVisitor {
+    std::function<bool(const std::string& path, uint64_t size)> begin;
+    std::function<bool(const uint8_t* p, size_t n)> data;
+    std::function<void(bool ok, const std::string& err)> end;
+};
+bool visitEntries(const Source& src, const std::string& password, EntryVisitor& v, Progress& prog, std::string& err);
 
 // --- creation ------------------------------------------------------------------
 struct InputItem {

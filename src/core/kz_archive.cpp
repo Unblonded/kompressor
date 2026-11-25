@@ -920,6 +920,136 @@ bool testArchive(const Source& src, const std::string& password, Progress& prog,
     return true;
 }
 
+bool visitEntries(const Source& src, const std::string& password, EntryVisitor& v, Progress& prog, std::string& err) {
+    auto cancelled = [&] {
+        if (!prog.cancelled()) return false;
+        err = "Cancelled";
+        return true;
+    };
+    if (kmp::isKmp(src)) {
+        kmp::Reader r;
+        if (!r.open(src, err)) return false;
+        r.setSequential(&prog);
+        uint64_t total = 0;
+        for (auto& e : r.entries())
+            if (e.type == kmp::EntryType::File) total += e.size;
+        prog.total = total;
+        for (size_t i = 0; i < r.entries().size(); ++i) {
+            const auto& e = r.entries()[i];
+            if (e.type != kmp::EntryType::File) continue;
+            if (!v.begin(e.path, e.size)) {
+                prog.done += e.size;
+                continue;
+            }
+            prog.setStatus(e.path);
+            std::string ferr;
+            bool stopped = false;
+            bool ok = r.readFile(i, [&](const uint8_t* p, size_t n) {
+                prog.done += n;
+                if (!v.data(p, n)) stopped = true;
+                return !stopped;
+            }, &prog, ferr);
+            if (cancelled() || stopped) {
+                if (err.empty()) err = "Cancelled";
+                return false;
+            }
+            v.end(ok, ferr);
+        }
+        return true;
+    }
+
+    LaReader r;
+    if (!r.open(src, password, err)) {
+        if (mentionsPassword(err)) prog.needPassword = true;
+        native::Container c;
+        std::string nerr;
+        if (prog.needPassword || !native::open(src, c, nerr)) return false;
+        err.clear();
+        uint64_t total = 0;
+        for (auto& it : c.items)
+            if (!it.isDir) total += it.size;
+        prog.total = total;
+        for (auto& it : c.items) {
+            if (it.isDir) continue;
+            if (!v.begin(it.path, it.size)) {
+                prog.done += it.size;
+                continue;
+            }
+            prog.setStatus(it.path);
+            std::string ferr;
+            bool stopped = false;
+            bool ok = native::readItem(src, it, [&](const uint8_t* p, size_t n) {
+                prog.done += n;
+                if (!v.data(p, n) || prog.cancelled()) stopped = true;
+                return !stopped;
+            }, ferr);
+            if (stopped) {
+                err = "Cancelled";
+                return false;
+            }
+            v.end(ok, ferr);
+        }
+        return true;
+    }
+    prog.total = sourceSize(src);
+    archive_entry* e;
+    int rc;
+    static const uint8_t zeros[65536] = {};
+    while ((rc = archive_read_next_header(r.a, &e)) == ARCHIVE_OK || rc == ARCHIVE_WARN) {
+        if (archive_entry_filetype(e) != AE_IFREG) continue;
+        std::string path = r.entryPath(e);
+        uint64_t size = archive_entry_size_is_set(e) ? (uint64_t)archive_entry_size(e) : 0;
+        if (!v.begin(path, size)) continue;  // the next header skips its data
+        prog.setStatus(path);
+        uint64_t pos = 0;
+        bool stopped = false;
+        auto feedZeros = [&](uint64_t upto) {
+            while (pos < upto && !stopped) {
+                size_t k = (size_t)std::min<uint64_t>(upto - pos, sizeof zeros);
+                if (!v.data(zeros, k)) stopped = true;
+                pos += k;
+            }
+        };
+        const void* buf;
+        size_t n;
+        la_int64_t off;
+        int dr;
+        while (!stopped && (dr = archive_read_data_block(r.a, &buf, &n, &off)) == ARCHIVE_OK) {
+            if (off >= 0 && (uint64_t)off > pos) feedZeros((uint64_t)off);  // a sparse file's hole
+            if (!stopped && n && !v.data((const uint8_t*)buf, n)) stopped = true;
+            pos += n;
+            prog.done = (uint64_t)archive_filter_bytes(r.a, -1);
+            if (prog.cancelled()) stopped = true;
+        }
+        if (stopped) {
+            err = "Cancelled";
+            return false;
+        }
+        if (dr < ARCHIVE_WARN) {
+            std::string m = laError(r.a);
+            if (mentionsPassword(m) || archive_entry_is_encrypted(e)) prog.needPassword = true;
+            v.end(false, m);
+            if (dr == ARCHIVE_FATAL) {
+                err = m;
+                return false;
+            }
+            continue;
+        }
+        feedZeros(size);  // a hole at the end
+        if (stopped) {
+            err = "Cancelled";
+            return false;
+        }
+        v.end(true, {});
+    }
+    if (rc != ARCHIVE_EOF && rc != ARCHIVE_OK && rc != ARCHIVE_WARN) {
+        err = laError(r.a);
+        return false;
+    }
+    prog.done = prog.total.load();
+    return true;
+}
+
 std::string libraryVersions() {
     std::string s = archive_version_details();
     return s;

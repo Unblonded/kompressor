@@ -305,6 +305,7 @@ void App::frame() {
     drawExtractWindow();
     drawConvertWindow();
     drawFormats();
+    drawHashWindow();
     drawAbout();
     drawSettings();
     drawPasswordPopup();
@@ -395,6 +396,8 @@ void App::drawMenuBar() {
         if (ImGui::MenuItem("Extract All...")) actionExtract(*at, false);
         if (ImGui::MenuItem("Extract Selected...", nullptr, false, !at->selection.empty())) actionExtract(*at, true);
         if (ImGui::MenuItem("Test Integrity")) actionTest(*at);
+        if (ImGui::MenuItem("Checksums...")) actionHash(*at, false);
+        ImGui::SetItemTooltip("CRC32, MD5, SHA-1 and SHA-256 of every file, and checking them against a list");
         ImGui::Separator();
         bool canEdit = at->editable && !at->editing;
         if (ImGui::MenuItem("Add Files...", nullptr, false, canEdit)) pickFilesToAdd(*at, false);
@@ -543,6 +546,9 @@ void App::drawToolbar() {
         ImGui::SameLine(0, sp);
         if (ghostButton("Test", Ico::Shield, ImVec2(0, bh))) actionTest(*at);
         ImGui::SetItemTooltip("Decompress everything in memory and verify checksums");
+        ImGui::SameLine(0, sp);
+        if (ghostButton("Checksums", Ico::Hash, ImVec2(0, bh))) actionHash(*at, !at->selection.empty());
+        ImGui::SetItemTooltip("CRC32 / MD5 / SHA-1 / SHA-256 of the files (the selected ones, or all), and checking a list");
         if (at->editable) {
             ImGui::SameLine(0, em * 0.9f);
             ImVec2 sp1 = ImGui::GetCursorScreenPos();
@@ -779,6 +785,11 @@ void App::drawExplorer(ExplorerTab& t) {
     if (debugRecompress_ && !t.loading && !t.nodes.empty()) {
         debugRecompress_ = false;
         actionConvert(t);
+    }
+    if (debugHash_ && !t.loading && !t.nodes.empty()) {
+        debugHash_ = false;
+        actionHash(t, false);
+        if (!debugHashList_.empty()) loadHashList(debugHashList_);
     }
     if (t.loading) {
         ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -1099,6 +1110,7 @@ void App::drawTable(ExplorerTab& t, float width) {
                 if (!n.isDir && ImGui::MenuItem("Preview")) requestPreview(t, id);
                 ImGui::Separator();
                 if (ImGui::MenuItem("Extract...")) actionExtract(t, true);
+                if (ImGui::MenuItem("Checksums...")) actionHash(t, true);
                 std::string kC = std::string(kMod) + "+C";
                 if (native::fileTransferSupported() && ImGui::MenuItem("Copy", kC.c_str())) copySelection(t);
                 if (ImGui::MenuItem("Delete", "Del", false, t.editable && !t.editing)) askDeleteSelection(t);

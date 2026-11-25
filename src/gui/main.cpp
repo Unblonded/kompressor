@@ -190,6 +190,16 @@ int main(int argc, char** argv) {
         } else {
             ++i;
         }
+    std::string debugHashList;
+    bool debugHash = false;
+    for (size_t i = 1; i < args.size(); ++i)
+        if (args[i] == "--debug-hash") {
+            debugHash = true;
+            size_t n = 1;
+            if (i + 2 < args.size()) debugHashList = args[i + 1], n = 2;  // a list, then the archive
+            args.erase(args.begin() + i, args.begin() + i + n);
+            break;
+        }
     std::string shellAction;
     std::vector<std::string> shellPaths;
     if (args.size() >= 3 && args[1] == "--shell") {
@@ -290,6 +300,7 @@ int main(int argc, char** argv) {
         if (openSettings) app.showSettings();
         if (debugDetach) app.debugDetach();
         if (debugRecompress) app.debugRecompress();
+        if (debugHash) app.debugHash(debugHashList);
 
         // Files passed on the command line / "Open with": archives open, anything else is queued to compress.
         std::vector<std::string> toCompress;

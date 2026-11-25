@@ -4,7 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <iostream>
 #include <thread>
 
@@ -13,6 +15,7 @@
 #include "kz_advisor.hpp"
 #include "kz_archive.hpp"
 #include "kz_gpu.hpp"
+#include "kz_hash.hpp"
 #include "kz_perf.hpp"
 
 #ifdef _WIN32
@@ -32,6 +35,8 @@ static void usage() {
         "  kompressor-cli list    <archive> [-p password]\n"
         "  kompressor-cli extract <archive> [-o outdir] [-p password] [--skip-existing] [entry...]\n"
         "  kompressor-cli test    <archive> [-p password]\n"
+        "  kompressor-cli hash    <archive> [-a crc32|md5|sha1|sha256|all] [-c list] [-p password] [entry...]\n"
+        "                         (checksums of the files inside; -c checks them against a .sha256/.md5/.sfv list)\n"
         "  kompressor-cli cat     <archive> <entry> [-p password]      (write one member to stdout)\n"
         "  kompressor-cli create  <out.zip|.7z|.tar.xz|...> <files/folders...> [-l level] [-p password] [-t threads]\n"
         "  kompressor-cli super   <out.kmp> <files/folders...> [-m fast|balanced|ultra|max|extreme|ultimate] [-t threads] [--no-dedup]\n"
@@ -112,7 +117,7 @@ int main(int argc, char** argv) {
     }
     std::string cmd = args[1];
     std::vector<std::string> pos;
-    std::string password, outDir, mode = "ultra", encrypt, intoDir;
+    std::string password, outDir, mode = "ultra", encrypt, intoDir, algo = "sha256", checkList;
     int level = -1, threads = 0;
     uint64_t volumeSize = 0;
     bool skipExisting = false, dedup = true, maxCpu = false, useGpu = false;
@@ -126,6 +131,8 @@ int main(int argc, char** argv) {
         else if (a == "-m") mode = next();
         else if (a == "-e") encrypt = next();
         else if (a == "-d") intoDir = next();
+        else if (a == "-a") algo = next();
+        else if (a == "-c") checkList = next();
         else if (a == "-v") {
             std::string v = next();
             volumeSize = parseSize(v);
@@ -252,6 +259,66 @@ int main(int argc, char** argv) {
         }
         std::printf("OK - archive is intact\n");
         return 0;
+    }
+
+    if (cmd == "hash" || cmd == "h") {
+        if (pos.empty()) return usage(), 1;
+        Source src{pos[0], nullptr, ""};
+        std::vector<ListedHash> listed;
+        unsigned which = 0;
+        if (!checkList.empty()) {
+            std::ifstream f(u8path(checkList), std::ios::binary);
+            if (!f) {
+                std::fprintf(stderr, "error: cannot read %s\n", checkList.c_str());
+                return 1;
+            }
+            std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            listed = parseHashList(text);
+            which = hashKindsOfList(listed);
+            if (!which) {
+                std::fprintf(stderr, "error: no checksums found in %s\n", checkList.c_str());
+                return 1;
+            }
+        } else if (algo == "all") which = kHashCrc32 | kHashMd5 | kHashSha1 | kHashSha256;
+        else if (algo == "crc32" || algo == "crc") which = kHashCrc32;
+        else if (algo == "md5") which = kHashMd5;
+        else if (algo == "sha1") which = kHashSha1;
+        else if (algo == "sha256") which = kHashSha256;
+        else return usage(), 1;
+        std::vector<std::string> only(pos.begin() + 1, pos.end());
+        std::vector<EntryHash> hashes;
+        bool ok = run(prog, [&] { return hashArchive(src, only, password, which, hashes, prog, err); });
+        printWarnings(prog);
+        if (!ok) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return prog.needPassword ? 3 : 2;
+        }
+        if (!listed.empty()) {
+            std::vector<std::string> extra;
+            auto checks = checkHashes(hashes, listed, &extra);
+            int bad = 0;
+            static const char* word[] = {"OK", "MISMATCH", "MISSING", "UNREADABLE"};
+            for (auto& c : checks) {
+                std::printf("%-10s %s\n", word[c.state], c.name.c_str());
+                if (c.state != HashCheck::Ok) ++bad;
+            }
+            for (auto& x : extra) std::printf("%-10s %s\n", "NOT LISTED", x.c_str());
+            std::printf("%zu checked, %d problem(s), %zu not in the list\n", checks.size(), bad, extra.size());
+            return bad ? 2 : 0;
+        }
+        static const HashKind kinds[] = {kHashCrc32, kHashMd5, kHashSha1, kHashSha256};
+        int bad = 0;
+        for (auto& h : hashes) {
+            if (!h.error.empty()) {
+                std::printf("%s: %s\n", h.path.c_str(), h.error.c_str());
+                ++bad;
+                continue;
+            }
+            for (HashKind k : kinds)
+                if (which & k) std::printf("%s ", h.get(k).c_str());
+            std::printf("*%s\n", h.path.c_str());
+        }
+        return bad ? 2 : 0;
     }
 
     if (cmd == "cat") {

@@ -75,6 +75,7 @@ add_library(kompressor_core STATIC
   src/core/kz_common.cpp
   src/core/kz_formats.cpp
   src/core/kz_archive.cpp
+  src/core/kz_hash.cpp
   src/core/kz_writer.cpp
   src/core/kmp.cpp
   src/core/kz_parallel.cpp
@@ -189,6 +190,7 @@ if(KOMPRESSOR_BUILD_GUI)
     src/gui/app.cpp
     src/gui/app_draw.cpp
     src/gui/app_files.cpp
+    src/gui/app_hash.cpp
     src/gui/app_icon.cpp
     src/gui/file_dialog.cpp
     src/gui/native_files.cpp

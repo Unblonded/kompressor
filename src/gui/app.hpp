@@ -10,9 +10,11 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "file_dialog.hpp"
+#include "kz_hash.hpp"
 #include "kz_advisor.hpp"
 #include "kz_archive.hpp"
 
@@ -156,6 +158,8 @@ public:
     void debugDetach() { debugDetach_ = true; }
     // Debug aid: open the Recompress dialog once the active archive has loaded.
     void debugRecompress() { debugRecompress_ = true; }
+    // Debug aid: open the Checksums window once the active archive has loaded (and check `list`, if given).
+    void debugHash(const std::string& list) { debugHash_ = true, debugHashList_ = list; }
     bool busy() const;
     // Debug aid for --snapshot: navigate to and preview an entry once the active tab has loaded.
     void debugSelect(const std::string& entryPath) { debugSelect_ = entryPath; }
@@ -227,6 +231,14 @@ private:
     void actionOpen();
     void actionExtract(ExplorerTab& t, bool selectionOnly);
     void actionTest(ExplorerTab& t);
+    // Checksums window (app_hash.cpp): every file, or the selected ones.
+    void actionHash(ExplorerTab& t, bool selectionOnly);
+    void runHash(unsigned which);
+    void recheckHashes();
+    void pickHashList();
+    void loadHashList(const std::string& path);
+    void saveHashList(kz::HashKind k);
+    void drawHashWindow();
     // Opens the tab's archive in Windows File Explorer, or shows it there when Explorer can't browse it.
     void openInExplorer(ExplorerTab& t);
     void actionConvert(ExplorerTab& t, bool super = false);  // recompress into another format
@@ -256,7 +268,8 @@ private:
     bool showActivity_ = true;
     bool showAbout_ = false;
     bool showSettings_ = false;
-    bool debugDetach_ = false, debugRecompress_ = false;
+    bool debugDetach_ = false, debugRecompress_ = false, debugHash_ = false;
+    std::string debugHashList_;
     std::string lastDir_;
     bool shellMenu_ = false;  // Explorer right-click menu installed
     bool maxPerf_ = false;    // Settings: maximum performance while compressing / extracting
@@ -314,6 +327,28 @@ private:
         kz::ContentProfile profile;
         bool focusPassword = false;
     } conv_;
+    struct HashState {
+        bool open = false, focus = false;
+        int tabId = -1;
+        kz::Source src;
+        std::string title, password, scope;
+        std::vector<std::string> only;
+        bool algo[4] = {false, false, false, true};  // CRC32, MD5, SHA-1, SHA-256
+        unsigned computed = 0;                        // kinds in `results`
+        bool running = false;
+        int runId = 0;
+        std::shared_ptr<kz::Progress> prog;
+        std::vector<kz::EntryHash> results;
+        std::string error;
+        // checking against a list
+        std::string listPath;
+        std::vector<kz::ListedHash> listed;
+        std::vector<kz::HashCheck> checks;
+        std::vector<std::string> notListed;
+        std::unordered_map<std::string, int> checkOf;  // entry path -> index in checks
+        char filter[128] = {};
+        bool problemsOnly = false;
+    } hash_;
     void drawSplitOption(bool* on, int* preset, int* customMb, float inner);
     // "Recommended for you": goal picker, the suggested format with its reasons and estimates, and a button
     // that applies it. Returns true when the user clicked "Use this" (`out` holds the recommendation).
