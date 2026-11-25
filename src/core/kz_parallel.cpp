@@ -9,6 +9,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <deque>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "kz_common.hpp"
+#include "kz_gpu.hpp"
 #include "kz_perf.hpp"
 #include "kz_pool.hpp"
 
@@ -194,6 +196,8 @@ private:
 // Cuts the input into blocks, compresses them on a pool and writes the results in order. Used for
 // gzip (one gzip member per block, like pigz -i) and bzip2 (one stream per block); every decoder
 // reads concatenated members/streams as one file.
+bool gzipMemberGpu(const std::vector<uint8_t>& in, int level, std::vector<uint8_t>& out);
+
 class BlockCompressor : public StreamCompressor {
 public:
     using Job = std::vector<uint8_t> (*)(const std::vector<uint8_t>& in, int level, std::string& err);
@@ -206,6 +210,11 @@ public:
         maxQueued_ = threads * 2;
         cur_.reserve(block_);
         return true;
+    }
+    // gzip only: blocks may also go to the graphics card, as one more worker beside the CPU threads.
+    void useGpu(int level) {
+        gpuLevel_ = level;
+        gpu::warmUp();  // the card joins in once it is ready; the CPU starts right away
     }
     ~BlockCompressor() override {
         for (auto& f : q_)
@@ -247,12 +256,26 @@ private:
         Job job = job_;
         int level = level_;
         Progress* pr = prog_;
-        q_.push_back(pool_->submit([job, level, block = std::move(block), pr]() {
-            Result r;
-            r.data = job(block, level, r.err);
-            if (pr) pr->pending -= (int64_t)block.size();
-            return r;
-        }));
+        // The card takes a block when it is ready and has a free slot (it works on two at a time);
+        // its thread mostly waits, so it doesn't take a CPU worker. Anything it can't do goes to zlib.
+        if (gpuLevel_ > 0 && !block.empty() && gpuBusy_.load() < 2 && gpu::ready()) {
+            gpuBusy_++;
+            std::atomic<int>* busy = &gpuBusy_;
+            q_.push_back(std::async(std::launch::async, [job, level, block = std::move(block), pr, busy]() {
+                Result r;
+                if (!gzipMemberGpu(block, level, r.data)) r.data = job(block, level, r.err);
+                (*busy)--;
+                if (pr) pr->pending -= (int64_t)block.size();
+                return r;
+            }));
+        } else {
+            q_.push_back(pool_->submit([job, level, block = std::move(block), pr]() {
+                Result r;
+                r.data = job(block, level, r.err);
+                if (pr) pr->pending -= (int64_t)block.size();
+                return r;
+            }));
+        }
         while (!q_.empty() && q_.front().wait_for(std::chrono::seconds(0)) == std::future_status::ready)
             if (!drain()) return false;
         while (q_.size() >= maxQueued_)
@@ -274,6 +297,8 @@ private:
     }
     Job job_ = nullptr;
     int level_ = 6;
+    int gpuLevel_ = 0;
+    std::atomic<int> gpuBusy_{0};
     size_t block_ = 8 * MiB;
     size_t maxQueued_ = 2;
     bool wroteAny_ = false;
@@ -299,6 +324,29 @@ std::vector<uint8_t> gzipMember(const std::vector<uint8_t>& in, int level, std::
     out.resize(z.total_out);
     deflateEnd(&z);
     return out;
+}
+
+// One gzip member with the graphics card finding the matches. False if the card couldn't do it.
+bool gzipMemberGpu(const std::vector<uint8_t>& in, int level, std::vector<uint8_t>& out) {
+    gpu::DeflateJob j;
+    j.data = in.data();
+    j.len = in.size();
+    j.final = true;
+    std::vector<gpu::DeflateJob*> jobs{&j};
+    std::string err;
+    bool busy = false;
+    gpu::BatchPtr b = gpu::begin(jobs, level, busy, err);
+    if (!b || !gpu::finish(*b, err)) return false;
+    gpu::encode(j);
+    static const uint8_t head[10] = {0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff};
+    out.clear();
+    out.reserve(j.out.size() + 18);
+    out.insert(out.end(), head, head + 10);
+    out.insert(out.end(), j.out.begin(), j.out.end());
+    uint32_t crc = (uint32_t)crc32(0L, in.data(), (uInt)in.size()), n = (uint32_t)in.size();
+    for (int i = 0; i < 4; i++) out.push_back((uint8_t)(crc >> (8 * i)));
+    for (int i = 0; i < 4; i++) out.push_back((uint8_t)(n >> (8 * i)));
+    return true;
 }
 
 #ifdef KZ_HAVE_BZIP2
@@ -337,6 +385,7 @@ std::unique_ptr<StreamCompressor> makeStreamCompressor(OutFormat f, int level, i
             size_t block = (size_t)perCore(sizeHint, t, 1 * MiB, 16 * MiB, 8 * MiB);
             auto c = std::make_unique<BlockCompressor>();
             if (!c->init(gzipMember, lv, block, t, outPath, err)) return nullptr;
+            if (lv > 0 && gpu::enabled() && gpu::supported() && !gpu::unusable()) c->useGpu(lv);
             return c;
         }
 #ifdef KZ_HAVE_BZIP2

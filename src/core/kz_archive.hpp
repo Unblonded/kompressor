@@ -93,6 +93,7 @@ struct CompressOptions {
     int threads = 0;         // 0 = auto
     bool dedup = true;       // KMP only
     uint64_t volumeSize = 0; // >0: split the finished archive into .001, .002 ... parts of this size
+    bool selfExtracting = false;  // Windows: wrap the archive in an .exe that extracts itself (see kz_sfx.hpp)
 };
 
 struct CompressResult {
@@ -126,9 +127,10 @@ struct ArchiveEdit {
 // volumes). `why` explains a refusal.
 bool canEditArchive(const Source& src, std::string& why);
 
-// Applies `edit` in place. The archive is rewritten in its own format into a temporary file that
-// replaces it at the end, so every entry is recompressed (RAR comes back stored). `password` is the
-// archive's password when it is encrypted; ZIP keeps it, other formats refuse.
+// Applies `edit` in place, through a temporary file that replaces the archive at the end. A ZIP keeps
+// its other entries' compressed bytes as they are and compresses only the new files; other formats
+// (and encrypted ZIPs) are rewritten whole, recompressing every entry (RAR comes back stored).
+// `password` is the archive's password when it is encrypted; ZIP keeps it, other formats refuse.
 bool editArchive(const Source& src, const ArchiveEdit& edit, const std::string& password, Progress& prog,
                  CompressResult& res, std::string& err);
 

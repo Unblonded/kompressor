@@ -10,12 +10,14 @@
 
 #include "app.hpp"
 #include "app_util.hpp"
+#include "chrome.hpp"
 #include "kmp.hpp"
 #include "native_files.hpp"
 #include "theme.hpp"
 #include "shell_integration.hpp"
 #include "kz_gpu.hpp"
 #include "kz_perf.hpp"
+#include "kz_sfx.hpp"
 #include "prefs.hpp"
 #include "window_frame.hpp"
 
@@ -188,106 +190,6 @@ Ico logIcon(const ImVec4& c) {
     if (same(c, col::Error)) return Ico::Error;
     if (same(c, col::Warn)) return Ico::Warn;
     return Ico::Info;
-}
-
-// Minimize / maximize / close at the right end of a custom title bar spanning [top, top + bh), ending at
-// `right` (screen coordinates). Adds their rectangles to `hit`; returns the x where they begin.
-float windowButtons(GLFWwindow* window, float right, float top, float bh, bool maximizable, std::vector<frame::Rect>& hit) {
-    const float em = emPx();
-    ImGuiWindow* w = ImGui::GetCurrentWindow();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    float bw = std::round(em * 3.1f), th = std::max(1.0f, std::round(em / 15.0f));
-    int kinds[3] = {0, 1, 2}, n = 3;
-    if (!maximizable) kinds[1] = 2, n = 2;
-    for (int k = 0; k < n; ++k) {
-        int i = kinds[k];
-        float x = right - bw * (n - k);
-        ImGui::SetCursorScreenPos(ImVec2(x, top));
-        ImGui::PushID(i);
-        bool clicked = ImGui::InvisibleButton("##wbtn", ImVec2(bw, bh));
-        bool hov = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
-        float h = anim(ImGui::GetItemID(), hov, 20.0f);
-        ImGui::PopID();
-        hit.push_back({x - w->Pos.x, top - w->Pos.y, x + bw - w->Pos.x, top + bh - w->Pos.y});
-        ImVec2 a(x, top), b(x + bw, top + bh);
-        if (i == 2) {
-            if (h > 0) dl->AddRectFilled(a, b, u32(ImVec4(0.78f, 0.17f, 0.20f, held ? 0.75f : 1.0f), h));
-        } else if (h > 0) {
-            dl->AddRectFilled(a, b, u32(held ? col::Line : col::Surface3, h));
-        }
-        ImU32 gc = u32(i == 2 ? mix(col::Dim, ImVec4(1, 1, 1, 1), h) : mix(col::Dim, col::Text, h));
-        float g = std::round(em * 0.68f);
-        ImVec2 c(std::round((a.x + b.x) * 0.5f), std::round((a.y + b.y) * 0.5f));
-        if (i == 0) {
-            dl->AddLine(ImVec2(c.x - g * 0.5f, c.y + 0.5f), ImVec2(c.x + g * 0.5f, c.y + 0.5f), gc, th);
-        } else if (i == 1) {
-            if (frame::maximized()) {
-                float o = std::round(g * 0.22f);
-                dl->AddRect(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f + o), ImVec2(c.x + g * 0.5f - o, c.y + g * 0.5f), gc, 1.5f, 0, th);
-                dl->PathLineTo(ImVec2(c.x - g * 0.5f + o, c.y - g * 0.5f + o));
-                dl->PathLineTo(ImVec2(c.x - g * 0.5f + o, c.y - g * 0.5f));
-                dl->PathLineTo(ImVec2(c.x + g * 0.5f, c.y - g * 0.5f));
-                dl->PathLineTo(ImVec2(c.x + g * 0.5f, c.y + g * 0.5f - o));
-                dl->PathLineTo(ImVec2(c.x + g * 0.5f - o, c.y + g * 0.5f - o));
-                dl->PathStroke(gc, 0, th);
-            } else {
-                dl->AddRect(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f), ImVec2(c.x + g * 0.5f, c.y + g * 0.5f), gc, 1.5f, 0, th);
-            }
-        } else {
-            dl->AddLine(ImVec2(c.x - g * 0.5f, c.y - g * 0.5f), ImVec2(c.x + g * 0.5f, c.y + g * 0.5f), gc, th);
-            dl->AddLine(ImVec2(c.x + g * 0.5f, c.y - g * 0.5f), ImVec2(c.x - g * 0.5f, c.y + g * 0.5f), gc, th);
-        }
-        if (clicked) {
-            if (i == 0) frame::minimize();
-            else if (i == 1) frame::toggleMaximize();
-            else glfwSetWindowShouldClose(window, 1);
-        }
-    }
-    return right - bw * n;
-}
-
-// `text` cut to fit `maxW` in the current font, with "..." at the end, or in the middle (paths: keeps
-// the drive and the last folder).
-std::string fitText(const std::string& text, float maxW, bool middle = false) {
-    if (ImGui::CalcTextSize(text.c_str()).x <= maxW) return text;
-    auto back = [&](size_t i) {  // start of the UTF-8 character before i
-        do --i; while (i > 0 && (text[i] & 0xC0) == 0x80);
-        return i;
-    };
-    auto fwd = [&](size_t i) {
-        do ++i; while (i < text.size() && (text[i] & 0xC0) == 0x80);
-        return i;
-    };
-    if (!middle) {
-        size_t n = text.size();
-        while (n > 0) {
-            n = back(n);
-            std::string t = text.substr(0, n) + "...";
-            if (ImGui::CalcTextSize(t.c_str()).x <= maxW) return t;
-        }
-        return "...";
-    }
-    // drop characters around the middle until it fits
-    size_t a = text.size() / 2, b = a;
-    for (bool left = true; a > 0 || b < text.size(); left = !left) {
-        if ((left && a > 0) || b >= text.size()) a = back(a);
-        else b = fwd(b);
-        std::string t = text.substr(0, a) + "..." + text.substr(b);
-        if (ImGui::CalcTextSize(t.c_str()).x <= maxW) return t;
-    }
-    return "...";
-}
-
-// Icon tile in the style of dialogHeader(): rounded gradient square with the icon in its centre.
-void iconTile(Ico ic, const ImVec4& tint, float tile) {
-    const float e = emPx();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    gradientRect(dl, p, ImVec2(p.x + tile, p.y + tile), u32(tint, 0.30f), u32(mix(tint, col::Accent2, 0.5f), 0.14f), e * 0.7f);
-    dl->AddRect(p, ImVec2(p.x + tile, p.y + tile), u32(tint, 0.35f), e * 0.7f, 0, 1.0f);
-    float is = tile * 0.52f;
-    drawIco(dl, ic, ImVec2(p.x + (tile - is) * 0.5f, p.y + (tile - is) * 0.5f), is, u32(mix(tint, col::Text, 0.35f)));
-    ImGui::Dummy(ImVec2(tile, tile));
 }
 
 #ifdef __APPLE__
@@ -2377,7 +2279,28 @@ void App::drawCompressWindow() {
         ImGui::PopFont();
         ImGui::SetItemTooltip("%s", cmp_.out);
     }
+    bool sfxOn = cmp_.sfx && kz::sfxSupported() && kz::sfxFormatOk(fd.id);
+    ImGui::BeginDisabled(sfxOn);
     drawSplitOption(&cmp_.split, &cmp_.splitPreset, &cmp_.splitCustomMb, inner);
+    ImGui::EndDisabled();
+    if (kz::sfxSupported()) {
+        bool fits = kz::sfxFormatOk(fd.id);
+        ImGui::BeginDisabled(!fits);
+        bool on = cmp_.sfx && fits;
+        if (toggle("Self-extracting (.exe)", &on)) cmp_.sfx = on;
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("%s", fits ? "Makes a program that extracts the files with a double-click, on any Windows PC "
+                                           "without Kompressor. Run it with -y to extract beside it without asking, or "
+                                           "-o<folder> to choose where."
+                                         : "Choose 7z, ZIP or a TAR format for a self-extracting archive.");
+        if (on && cmp_.out[0]) {
+            ImGui::SameLine(0, em * 0.6f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushFont(fonts().caption);
+            ImGui::TextColored(col::Dim, "saved as %s", kz::fileNameOf(kz::sfxPathFor(cmp_.out)).c_str());
+            ImGui::PopFont();
+        }
+    }
     toggle("Open the archive when finished", &cmp_.openWhenDone);
 
     // --- footer
@@ -2872,21 +2795,32 @@ void App::drawSettings() {
         caption("INTEGRATION");
         if (ImGui::IsWindowAppearing()) shellMenu_ = shell::registered();  // the installer may have changed it
         bool on = shellMenu_;
-        if (toggle("Show Kompressor in the Explorer right-click menu", &on)) {
+#ifdef _WIN32
+        const char* menuLabel = "Show Kompressor in the Explorer right-click menu";
+        const char* menuHelp = "Adds a \"Komp\" submenu to files and folders: compress, super compress, and for "
+                               "archives open and extract. On Windows 11 it sits under \"Show more options\".";
+#elif defined(__APPLE__)
+        const char* menuLabel = "Show Kompressor in Finder's Quick Actions";
+        const char* menuHelp = "Adds \"Kompressor: ...\" entries to the Quick Actions (and Services) menu when you "
+                               "right-click files in Finder: compress, checksums, and for archives open and extract.";
+#else
+        const char* menuLabel = "Show Kompressor in the file manager's right-click menu";
+        const char* menuHelp = "Adds Kompressor entries to the right-click menu of GNOME Files (under Scripts), Dolphin "
+                               "and Nemo: compress, checksums, and for archives open and extract.";
+#endif
+        if (toggle(menuLabel, &on)) {
             std::string err;
             if (on ? shell::registerMenu(err) : shell::unregisterMenu(err)) {
                 shellMenu_ = on;
-                log(col::Dim, on ? "Added Kompressor to the Explorer right-click menu."
-                                 : "Removed Kompressor from the Explorer right-click menu.");
+                log(col::Dim, on ? "Added Kompressor to the right-click menu." : "Removed Kompressor from the right-click menu.");
                 toast(col::Ok, on ? "Added to the right-click menu" : "Removed from the right-click menu");
             } else {
-                log(col::Error, "Explorer menu: " + err);
+                log(col::Error, "Right-click menu: " + err);
                 toast(col::Error, "Could not change the right-click menu");
             }
         }
         ImGui::PushStyleColor(ImGuiCol_Text, col::Dim);
-        ImGui::TextWrapped("Adds a \"Komp\" submenu to files and folders: compress, super compress, and for "
-                           "archives open and extract. On Windows 11 it sits under \"Show more options\".");
+        ImGui::TextWrapped("%s", menuHelp);
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, em * 0.6f));
     }
@@ -2917,15 +2851,15 @@ void App::drawSettings() {
             }
             prefs::setBool("UseGpu", useGpu_);
             kz::gpu::setEnabled(useGpu_);
-            if (useGpu_) log(col::Dim, "The graphics card (" + kz::gpu::adapterName() + ") will help with ZIP compression.");
+            if (useGpu_) log(col::Dim, "The graphics card (" + kz::gpu::adapterName() + ") will help with ZIP, GZ and TAR.GZ compression.");
         }
         ImGui::PushStyleColor(ImGuiCol_Text, col::Dim);
         std::string card = kz::gpu::adapterName();
-        ImGui::TextWrapped("%s", ("While a ZIP is made, " + (card.empty() ? std::string("the graphics card") : card) +
-                                  " searches for repeated data alongside the CPU. It takes the pieces it can finish "
-                                  "before the CPU would get to them, so it only ever speeds a job up (most on big "
-                                  "jobs and high levels). The ZIP stays a normal one any app opens, about the same "
-                                  "size. Other formats can't be split up like this and stay on the CPU.")
+        ImGui::TextWrapped("%s", ("While a ZIP, GZ or TAR.GZ is made, " + (card.empty() ? std::string("the graphics card") : card) +
+                                  " searches for repeated data alongside the CPU, taking pieces of the job as one "
+                                  "more worker (most help on big jobs and high levels). The file stays a normal one "
+                                  "any app opens, about the same size. 7z, XZ, Zstandard and the rest use other "
+                                  "methods the card can't run, so they stay on the CPU.")
                                      .c_str());
         ImGui::PopStyleColor();
     }

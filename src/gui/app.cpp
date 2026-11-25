@@ -15,6 +15,7 @@
 #include "shell_integration.hpp"
 #include "kz_gpu.hpp"
 #include "kz_perf.hpp"
+#include "kz_sfx.hpp"
 #include "prefs.hpp"
 
 #ifdef _WIN32
@@ -961,8 +962,13 @@ void App::runCompress() {
     o.threads = cmp_.threads;
     o.dedup = cmp_.dedup;
     o.volumeSize = cmp_.split ? splitBytes(cmp_.splitPreset, cmp_.splitCustomMb) : 0;
+    o.selfExtracting = cmp_.sfx && kz::sfxSupported() && kz::sfxFormatOk(fd.id);
     std::vector<std::string> inputs = cmp_.inputs;
     std::string out = cmp_.out;
+    if (o.selfExtracting) {
+        o.volumeSize = 0;
+        out = kz::sfxPathFor(out);
+    }
     bool openAfter = cmp_.openWhenDone;
     lastDir_ = parentDir(out);
     auto res = std::make_shared<kz::CompressResult>();

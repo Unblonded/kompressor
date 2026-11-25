@@ -78,6 +78,7 @@ add_library(kompressor_core STATIC
   src/core/kz_hash.cpp
   src/core/kz_search.cpp
   src/core/kz_ramdrive.cpp
+  src/core/kz_sfx.cpp
   src/core/kz_writer.cpp
   src/core/kmp.cpp
   src/core/kz_parallel.cpp
@@ -137,11 +138,27 @@ if(APPLE)
 endif()
 
 # ---------------------------------------------------------------------------
+# Self-extractor (Windows): the small program at the front of a self-extracting .exe, drawn with the
+# same ImGui look as the app. It is built with the GUI (below) and embedded in Kompressor.exe and
+# kompressor-cli.exe as a resource, which copy it out when they make one.
+# ---------------------------------------------------------------------------
+if(WIN32 AND KOMPRESSOR_BUILD_GUI)
+  set(KZ_SFX_EXE "${CMAKE_BINARY_DIR}/kz-sfx.exe")
+  set(KZ_SFX_RC "${CMAKE_BINARY_DIR}/kz_sfx_embed.rc")
+  file(WRITE "${KZ_SFX_RC}" "KZSFX RCDATA \"${KZ_SFX_EXE}\"\n")
+  set_source_files_properties("${KZ_SFX_RC}" PROPERTIES OBJECT_DEPENDS "${KZ_SFX_EXE}")
+  target_compile_definitions(kompressor_core PRIVATE KZ_HAVE_SFX)
+endif()
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 if(KOMPRESSOR_BUILD_CLI)
   if(WIN32)
-    add_executable(kompressor-cli src/cli/main.cpp packaging/windows/kompressor-cli.rc)
+    add_executable(kompressor-cli src/cli/main.cpp packaging/windows/kompressor-cli.rc ${KZ_SFX_RC})
+    if(KZ_SFX_RC)
+      add_dependencies(kompressor-cli kz-sfx)
+    endif()
   else()
     add_executable(kompressor-cli src/cli/main.cpp)
   endif()
@@ -189,6 +206,25 @@ if(KOMPRESSOR_BUILD_GUI)
     target_compile_definitions(imgui PUBLIC GL_SILENCE_DEPRECATION)
   endif()
 
+  if(WIN32)
+    add_executable(kz-sfx WIN32 src/sfx/sfx_main.cpp src/gui/theme.cpp src/gui/chrome.cpp src/gui/app_icon.cpp
+                   src/gui/window_frame.cpp packaging/windows/kz-sfx.rc)
+    target_include_directories(kz-sfx PRIVATE src/gui)
+    target_compile_definitions(kz-sfx PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+    target_link_libraries(kz-sfx PRIVATE imgui LibArchive::LibArchive LibLZMA::LibLZMA ZLIB::ZLIB ${KZ_ZSTD_TARGET}
+                          dwmapi shell32 ole32 user32 gdi32)
+    if(TARGET BZip2::BZip2)
+      target_link_libraries(kz-sfx PRIVATE BZip2::BZip2)
+    endif()
+    if(MSVC)
+      target_compile_options(kz-sfx PRIVATE /utf-8 /W3)
+      target_link_options(kz-sfx PRIVATE /ENTRY:wWinMainCRTStartup /MANIFEST:NO)  # the .rc embeds the manifest
+    endif()
+    set_target_properties(kz-sfx PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    set_source_files_properties(packaging/windows/kz-sfx.rc PROPERTIES
+      OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/packaging/icons/kompressor.ico;${CMAKE_SOURCE_DIR}/packaging/windows/kz-sfx.manifest")
+  endif()
+
   set(KZ_GUI_SOURCES
     src/gui/main.cpp
     src/gui/app.cpp
@@ -198,6 +234,7 @@ if(KOMPRESSOR_BUILD_GUI)
     src/gui/app_search.cpp
     src/gui/app_ramdrive.cpp
     src/gui/app_icon.cpp
+    src/gui/chrome.cpp
     src/gui/file_dialog.cpp
     src/gui/native_files.cpp
     src/gui/prefs.cpp
@@ -206,7 +243,12 @@ if(KOMPRESSOR_BUILD_GUI)
     src/gui/window_frame.cpp)
 
   if(APPLE)
+    # Dragging files out and the file pasteboard use AppKit (Objective-C++).
+    enable_language(OBJCXX)
+    list(APPEND KZ_GUI_SOURCES src/gui/native_files_mac.mm)
+    set_source_files_properties(src/gui/native_files_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     add_executable(Kompressor MACOSX_BUNDLE ${KZ_GUI_SOURCES})
+    target_link_libraries(Kompressor PRIVATE "-framework AppKit")
     set_target_properties(Kompressor PROPERTIES
       MACOSX_BUNDLE_GUI_IDENTIFIER "app.kompressor"
       MACOSX_BUNDLE_BUNDLE_NAME "Kompressor"
@@ -217,7 +259,8 @@ if(KOMPRESSOR_BUILD_GUI)
     target_sources(Kompressor PRIVATE ${KZ_ICNS})
     set_source_files_properties(${KZ_ICNS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   elseif(WIN32)
-    add_executable(Kompressor WIN32 ${KZ_GUI_SOURCES} packaging/windows/kompressor.rc)
+    add_executable(Kompressor WIN32 ${KZ_GUI_SOURCES} packaging/windows/kompressor.rc ${KZ_SFX_RC})
+    add_dependencies(Kompressor kz-sfx)
     if(MSVC)
       # The .rc embeds our own manifest (DPI awareness, UTF-8 code page, long paths).
       target_link_options(Kompressor PRIVATE /ENTRY:mainCRTStartup /MANIFEST:NO)

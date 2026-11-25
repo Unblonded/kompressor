@@ -337,6 +337,7 @@ private:
         bool openWhenDone = true;
         bool split = false;
         int splitPreset = 0, splitCustomMb = 1024;
+        bool sfx = false;  // Windows: a self-extracting .exe
         // recommendation
         int goal = 0;                                   // kz::Goal
         std::string adviceKey;                          // the inputs the profile below belongs to

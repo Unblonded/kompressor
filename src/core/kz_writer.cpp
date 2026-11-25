@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <unordered_set>
@@ -15,6 +16,7 @@
 #include "kz_archive.hpp"
 #include "kz_parallel.hpp"
 #include "kz_rar.hpp"
+#include "kz_sfx.hpp"
 #include "kz_zip.hpp"
 
 namespace kz {
@@ -913,6 +915,286 @@ private:
     uint64_t files_ = 0;
 };
 
+// ------------------------------------------------------------------------------------ fast ZIP edits
+// A ZIP's entries are independent, so an edit can copy the kept entries' compressed bytes as they
+// are and append only what's new: no entry is decompressed or recompressed.
+namespace zipsplice {
+
+uint16_t g16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
+uint32_t g32(const uint8_t* p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+uint64_t g64(const uint8_t* p) { return (uint64_t)g32(p) | (uint64_t)g32(p + 4) << 32; }
+void p16(std::string& o, uint16_t v) { o += (char)(v & 255), o += (char)(v >> 8); }
+void p32(std::string& o, uint32_t v) { p16(o, (uint16_t)v), p16(o, (uint16_t)(v >> 16)); }
+void p64(std::string& o, uint64_t v) { p32(o, (uint32_t)v), p32(o, (uint32_t)(v >> 32)); }
+void s32(uint8_t* p, uint32_t v) { p[0] = (uint8_t)v, p[1] = (uint8_t)(v >> 8), p[2] = (uint8_t)(v >> 16), p[3] = (uint8_t)(v >> 24); }
+
+struct Ent {
+    std::vector<uint8_t> rec;  // the central directory record
+    std::string name;
+    uint64_t off = 0, end = 0;  // the local header and data: [off, end)
+    uint16_t flags = 0;
+};
+
+struct Zip {
+    std::vector<Ent> ents;
+    std::string comment;
+};
+
+// Reads a ZIP's central directory. False when it isn't a plain single-file ZIP whose offsets
+// start at 0 (self-extractors, multi-disk sets), which the slow path handles.
+bool read(std::ifstream& f, uint64_t size, Zip& z) {
+    if (size < 22) return false;
+    size_t tail = (size_t)std::min<uint64_t>(size, 65535 + 22 + 20 + 56);
+    std::vector<uint8_t> t(tail);
+    f.seekg((std::streamoff)(size - tail));
+    if (!f.read((char*)t.data(), (std::streamsize)tail)) return false;
+    size_t e = std::string::npos;
+    for (size_t i = tail - 22 + 1; i-- > 0;)
+        if (g32(&t[i]) == 0x06054b50 && i + 22 + g16(&t[i + 20]) == tail) {
+            e = i;
+            break;
+        }
+    if (e == std::string::npos) return false;
+    const uint8_t* q = &t[e];
+    if (g16(q + 4) || g16(q + 6)) return false;  // multi-disk
+    uint64_t count = g16(q + 10), cdSize = g32(q + 12), cdOff = g32(q + 16);
+    uint64_t eocdPos = size - tail + e, cdEnd = eocdPos;
+    z.comment.assign((const char*)q + 22, g16(q + 20));
+    if (count == 0xFFFF || cdSize == 0xFFFFFFFF || cdOff == 0xFFFFFFFF) {
+        if (e < 20 || g32(&t[e - 20]) != 0x07064b50) return false;
+        uint64_t z64 = g64(&t[e - 20 + 8]);
+        uint8_t r[56];
+        f.seekg((std::streamoff)z64);
+        if (!f.read((char*)r, 56) || g32(r) != 0x06064b50) return false;
+        count = g64(r + 32), cdSize = g64(r + 40), cdOff = g64(r + 48);
+        cdEnd = z64;
+    }
+    if (cdOff + cdSize != cdEnd || cdSize > (1ull << 31)) return false;  // data in front of the archive, or nonsense
+    std::vector<uint8_t> cd((size_t)cdSize);
+    f.seekg((std::streamoff)cdOff);
+    if (cdSize && !f.read((char*)cd.data(), (std::streamsize)cdSize)) return false;
+    size_t at = 0;
+    for (uint64_t i = 0; i < count; ++i) {
+        if (at + 46 > cd.size() || g32(&cd[at]) != 0x02014b50) return false;
+        const uint8_t* r = &cd[at];
+        size_t nl = g16(r + 28), xl = g16(r + 30), cl = g16(r + 32), len = 46 + nl + xl + cl;
+        if (at + len > cd.size()) return false;
+        Ent en;
+        en.rec.assign(r, r + len);
+        en.name.assign((const char*)r + 46, nl);
+        en.flags = g16(r + 8);
+        en.off = g32(r + 42);
+        if (g16(r + 34) == 0xFFFF) return false;
+        if (en.off == 0xFFFFFFFF) {  // in the ZIP64 extra field, after the sizes that are also there
+            const uint8_t* x = r + 46 + nl;
+            bool found = false;
+            for (size_t k = 0; k + 4 <= xl;) {
+                uint16_t id = g16(x + k), n = g16(x + k + 2);
+                if (k + 4 + n > xl) break;
+                if (id == 1) {
+                    size_t pos = 0;
+                    if (g32(r + 24) == 0xFFFFFFFF) pos += 8;
+                    if (g32(r + 20) == 0xFFFFFFFF) pos += 8;
+                    if (pos + 8 <= n) en.off = g64(x + k + 4 + pos), found = true;
+                }
+                k += 4 + n;
+            }
+            if (!found) return false;
+        }
+        z.ents.push_back(std::move(en));
+        at += len;
+    }
+    // Each entry runs to the next one's local header (data descriptors included), the last to the
+    // central directory.
+    std::vector<Ent*> byOff;
+    for (auto& en : z.ents) byOff.push_back(&en);
+    std::sort(byOff.begin(), byOff.end(), [](Ent* a, Ent* b) { return a->off < b->off; });
+    for (size_t i = 0; i < byOff.size(); ++i) {
+        byOff[i]->end = i + 1 < byOff.size() ? byOff[i + 1]->off : cdOff;
+        if (byOff[i]->end <= byOff[i]->off) return false;  // two entries at one place
+    }
+    return true;
+}
+
+// The record with its local header offset set to `off` (in the ZIP64 extra field when it needs to be).
+std::string relocate(const Ent& en, uint64_t off) {
+    const uint8_t* r = en.rec.data();
+    size_t nl = g16(r + 28), xl = g16(r + 30), cl = g16(r + 32);
+    bool bigU = g32(r + 24) == 0xFFFFFFFF, bigC = g32(r + 20) == 0xFFFFFFFF;
+    uint64_t u = 0, c = 0;
+    std::string others;
+    const uint8_t* x = r + 46 + nl;
+    for (size_t k = 0; k + 4 <= xl;) {
+        uint16_t id = g16(x + k), n = g16(x + k + 2);
+        if (k + 4 + n > xl) break;
+        if (id == 1) {
+            size_t pos = 0;
+            if (bigU && pos + 8 <= n) u = g64(x + k + 4 + pos), pos += 8;
+            if (bigC && pos + 8 <= n) c = g64(x + k + 4 + pos), pos += 8;
+        } else {
+            others.append((const char*)x + k, 4 + n);
+        }
+        k += 4 + n;
+    }
+    bool bigO = off >= 0xFFFFFFFF;
+    std::string z64;
+    if (bigU) p64(z64, u);
+    if (bigC) p64(z64, c);
+    if (bigO) p64(z64, off);
+    std::string extra;
+    if (!z64.empty()) {
+        p16(extra, 1);
+        p16(extra, (uint16_t)z64.size());
+        extra += z64;
+    }
+    extra += others;
+    std::vector<uint8_t> head(r, r + 46);
+    s32(&head[42], bigO ? 0xFFFFFFFFu : (uint32_t)off);
+    head[30] = (uint8_t)extra.size(), head[31] = (uint8_t)(extra.size() >> 8);
+    std::string out((const char*)head.data(), 46);
+    out.append((const char*)r + 46, nl);
+    out += extra;
+    out.append((const char*)r + 46 + nl + xl, cl);
+    return out;
+}
+
+std::string norm(std::string n) {
+    std::replace(n.begin(), n.end(), '\\', '/');
+    while (n.compare(0, 2, "./") == 0) n.erase(0, 2);
+    while (!n.empty() && n[0] == '/') n.erase(0, 1);
+    while (!n.empty() && n.back() == '/') n.pop_back();
+    return n;
+}
+
+}  // namespace zipsplice
+
+// 1: done; 0: this ZIP needs the full rewrite; -1: failed (`err`).
+int fastZipEdit(const Source& src, const EditPlan& plan, Progress& prog, CompressResult& res, std::string& err) {
+    using namespace zipsplice;
+    std::ifstream in(u8path(src.path), std::ios::binary);
+    if (!in) return 0;
+    uint64_t size = fileSize(src.path);
+    Zip z;
+    if (!read(in, size, z)) return 0;
+    for (auto& en : z.ents)
+        if (en.flags & 1) return 0;  // encrypted: the slow path checks the password on the way
+    if (z.ents.size() > 60000) return 0;
+
+    // The new files, compressed on their own into a temporary ZIP.
+    std::string addTmp = src.path + ".kzadd";
+    Zip az;
+    std::ifstream ain;
+    if (!plan.add.empty()) {
+        CompressOptions o;
+        o.format = OutFormat::Zip;
+        CompressResult r2;
+        uint64_t before = prog.done;
+        if (!createLibarchive(plan.add, addTmp, o, prog, r2, err)) {
+            discardTemp(addTmp);
+            return -1;
+        }
+        prog.done = before;
+        ain.open(u8path(addTmp), std::ios::binary);
+        if (!ain || !read(ain, fileSize(addTmp), az)) {
+            ain.close();
+            discardTemp(addTmp);
+            return 0;
+        }
+    }
+
+    // Kept entries, then the new ones, copied as they are.
+    std::vector<std::pair<const Ent*, std::ifstream*>> keep;
+    uint64_t copyBytes = 0;
+    for (auto& en : z.ents)
+        if (!plan.drops(norm(en.name))) keep.push_back({&en, &in}), copyBytes += en.end - en.off;
+    for (auto& en : az.ents) keep.push_back({&en, &ain}), copyBytes += en.end - en.off;
+    std::string tmp = tmpPathFor(src.path);
+    std::ofstream out(u8path(tmp), std::ios::binary | std::ios::trunc);
+    if (!out) {
+        err = "Could not write next to the archive";
+        ain.close();
+        discardTemp(addTmp);
+        return -1;
+    }
+    prog.total = copyBytes;
+    prog.done = 0;
+    prog.setStatus("Updating " + src.name());
+    std::vector<char> buf(kIoBuf);
+    std::string cd;
+    uint64_t pos = 0;
+    bool ok = true;
+    for (auto& [en, f] : keep) {
+        if (prog.cancelled()) {
+            err = "Cancelled";
+            ok = false;
+            break;
+        }
+        cd += relocate(*en, pos);
+        f->seekg((std::streamoff)en->off);
+        uint64_t left = en->end - en->off;
+        char sig[4];
+        if (!f->read(sig, 4) || g32((const uint8_t*)sig) != 0x04034b50) {
+            err = "The archive is damaged (an entry's header is missing)";
+            ok = false;
+            break;
+        }
+        out.write(sig, 4);
+        left -= 4;
+        while (left) {
+            size_t n = (size_t)std::min<uint64_t>(left, buf.size());
+            if (!f->read(buf.data(), (std::streamsize)n)) {
+                err = "Could not read the archive";
+                ok = false;
+                break;
+            }
+            out.write(buf.data(), (std::streamsize)n);
+            left -= n;
+            prog.done += n;
+        }
+        if (!ok) break;
+        pos += en->end - en->off;
+    }
+    if (ok) {
+        uint64_t cdOff = pos, cdSize = cd.size(), count = keep.size();
+        std::string tailRec;
+        if (count >= 0xFFFF || cdOff >= 0xFFFFFFFF || cdSize >= 0xFFFFFFFF) {
+            p32(tailRec, 0x06064b50);
+            p64(tailRec, 44);
+            p16(tailRec, 45), p16(tailRec, 45);
+            p32(tailRec, 0), p32(tailRec, 0);
+            p64(tailRec, count), p64(tailRec, count), p64(tailRec, cdSize), p64(tailRec, cdOff);
+            p32(tailRec, 0x07064b50);
+            p32(tailRec, 0);
+            p64(tailRec, cdOff + cdSize);
+            p32(tailRec, 1);
+        }
+        p32(tailRec, 0x06054b50);
+        p16(tailRec, 0), p16(tailRec, 0);
+        p16(tailRec, (uint16_t)std::min<uint64_t>(count, 0xFFFF));
+        p16(tailRec, (uint16_t)std::min<uint64_t>(count, 0xFFFF));
+        p32(tailRec, (uint32_t)std::min<uint64_t>(cdSize, 0xFFFFFFFF));
+        p32(tailRec, (uint32_t)std::min<uint64_t>(cdOff, 0xFFFFFFFF));
+        p16(tailRec, (uint16_t)z.comment.size());
+        tailRec += z.comment;
+        out.write(cd.data(), (std::streamsize)cd.size());
+        out.write(tailRec.data(), (std::streamsize)tailRec.size());
+        out.close();
+        if (!out) err = "Could not write the archive (is the disk full?)", ok = false;
+    }
+    out.close();
+    in.close();
+    ain.close();
+    discardTemp(addTmp);
+    if (!ok) {
+        discardTemp(tmp);
+        return -1;
+    }
+    if (!commitTemp(tmp, src.path, err)) return -1;
+    fillResult(res, plan.add, src.path);
+    res.parts = {src.path};
+    return 1;
+}
+
 }  // namespace
 
 static bool convertWhole(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
@@ -1175,10 +1457,26 @@ static bool convertWhole(const Source& src, const std::string& outPath, const Co
     return true;
 }
 
+// Whether the options ask for a self-extracting archive that can't be made (checked before any work).
+static bool sfxCheck(const CompressOptions& opt, std::string& err) {
+    if (!opt.selfExtracting) return true;
+    if (!sfxSupported()) err = "This build of Kompressor can't make self-extracting archives (Windows only).";
+    else if (opt.volumeSize) err = "A self-extracting archive can't also be split into parts.";
+    else if (!sfxFormatOk(opt.format))
+        err = std::string("A self-extracting archive can't hold a ") + formatDesc(opt.format).name + "; use 7z or ZIP.";
+    return err.empty();
+}
+
 // Splits a finished archive into volumes when asked to, and records which files were written.
 static bool finishOutput(const std::string& outPath, const CompressOptions& opt, Progress& prog, CompressResult& res,
                          std::string& err) {
     res.parts.clear();
+    if (opt.selfExtracting) {
+        prog.setStatus("Making it self-extracting");
+        if (!makeSelfExtracting(outPath, !opt.password.empty(), err)) return false;
+        res.outputBytes = fileSize(outPath);
+        res.summary = ratioText(res.inputBytes, res.outputBytes) + ", self-extracting";
+    }
     if (!opt.volumeSize) {
         res.parts.push_back(outPath);
         return true;
@@ -1192,12 +1490,12 @@ static bool finishOutput(const std::string& outPath, const CompressOptions& opt,
 
 bool createArchive(const std::vector<std::string>& inputs, const std::string& outPath, const CompressOptions& opt,
                    Progress& prog, CompressResult& res, std::string& err) {
-    return createWhole(inputs, outPath, opt, prog, res, err) && finishOutput(outPath, opt, prog, res, err);
+    return sfxCheck(opt, err) && createWhole(inputs, outPath, opt, prog, res, err) && finishOutput(outPath, opt, prog, res, err);
 }
 
 bool convertArchive(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,
                     Progress& prog, CompressResult& res, std::string& err) {
-    return convertWhole(src, outPath, opt, password, prog, res, err) && finishOutput(outPath, opt, prog, res, err);
+    return sfxCheck(opt, err) && convertWhole(src, outPath, opt, password, prog, res, err) && finishOutput(outPath, opt, prog, res, err);
 }
 
 static std::string lowerStr(std::string s) {
@@ -1277,6 +1575,11 @@ bool editArchive(const Source& src, const ArchiveEdit& edit, const std::string& 
         }
     }
     prog.setStatus("Updating " + src.name());
+    if (opt.format == OutFormat::Zip && password.empty() && !std::getenv("KZ_SLOW_EDIT")) {
+        int r = fastZipEdit(src, plan, prog, res, err);
+        if (r) return r > 0;
+        err.clear();
+    }
     return convertWhole(src, src.path, opt, password, prog, res, err, &plan);
 }
 

@@ -274,6 +274,7 @@ void openWithDefaultApp(const std::string& path) {
         }).detach();
 }
 
+#ifndef __APPLE__  // macOS: native_files_mac.mm
 bool fileTransferSupported() { return false; }
 std::vector<std::string> clipboardFiles() { return {}; }
 bool setClipboardFiles(GLFWwindow*, const std::vector<std::string>&) { return false; }
@@ -281,6 +282,7 @@ bool dragFilesOut(GLFWwindow*, const std::vector<std::string>&, const std::funct
                   const std::function<void()>&) {
     return false;
 }
+#endif
 
 #endif
 

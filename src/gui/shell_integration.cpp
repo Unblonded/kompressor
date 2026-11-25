@@ -1,15 +1,25 @@
 #include "shell_integration.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+
+#include "kz_common.hpp"
+#include "prefs.hpp"
+
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
 
-#include <chrono>
-#include <filesystem>
-#include <fstream>
-
-#include "kz_common.hpp"
 #include "../shellext/komp_shell_common.hpp"
+#else
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 namespace kzgui::shell {
@@ -344,11 +354,291 @@ bool collectShellLaunch(const std::string& action, std::vector<std::string>& pat
 
 #else  // !_WIN32
 
-bool supported() { return false; }
-bool registered() { return false; }
-bool registerMenu(std::string& err) { err = "not supported on this platform"; return false; }
-bool unregisterMenu(std::string&) { return true; }
-void autoRegister() {}
+// macOS: Finder Quick Actions (Automator service workflows in ~/Library/Services).
+// Linux: Nautilus scripts, a Dolphin service menu and Nemo actions. Each passes every selected path
+// to one launch, so no batching is needed.
+namespace {
+
+namespace fs = std::filesystem;
+
+struct Item {
+    const char* action;  // the --shell action
+    const char* label;
+    bool archivesOnly;
+};
+const Item kItems[] = {
+    {"open", "Open archive", true},
+    {"extract-here", "Extract here", true},
+    {"extract-to", "Extract to folder", true},
+    {"test", "Test archive", true},
+    {"compress", "Add to archive...", false},
+    {"super", "Super compress...", false},
+    {"add-zip", "Add to ZIP", false},
+    {"add-7z", "Add to 7z", false},
+    {"hash", "Checksums", false},
+};
+
+std::string selfExe() {
+#ifdef __linux__
+    if (const char* ai = std::getenv("APPIMAGE")) return ai;  // the AppImage, not its temporary mount
+    std::error_code ec;
+    return fs::read_symlink("/proc/self/exe", ec).string();
+#else
+    char buf[4096];
+    uint32_t n = sizeof buf;
+    if (_NSGetExecutablePath(buf, &n) != 0) return {};
+    std::error_code ec;
+    fs::path p = fs::weakly_canonical(buf, ec);
+    return ec ? std::string(buf) : p.string();
+#endif
+}
+
+fs::path home() {
+    const char* h = std::getenv("HOME");
+    return h ? fs::path(h) : fs::path();
+}
+
+// Text safe inside double quotes in sh and in .desktop Exec lines.
+std::string quoted(const std::string& s) {
+    std::string o = "\"";
+    for (char c : s) {
+        if (c == '"' || c == '\\' || c == '$' || c == '`') o += '\\';
+        o += c;
+    }
+    return o + "\"";
+}
+
+bool writeFile(const fs::path& p, const std::string& text, bool executable) {
+    std::error_code ec;
+    fs::create_directories(p.parent_path(), ec);
+    {
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f << text;
+        if (!f) return false;
+    }
+    if (executable)
+        fs::permissions(p, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec | fs::perms::others_read |
+                               fs::perms::others_exec, ec);
+    return true;
+}
+
+std::string readFile(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+#ifdef __APPLE__
+fs::path servicesDir() { return home() / "Library" / "Services"; }
+fs::path workflowPath(const Item& it) { return servicesDir() / (std::string("Kompressor - ") + it.label + ".workflow"); }
+
+std::string xmlEsc(const std::string& s) {
+    std::string o;
+    for (char c : s) {
+        if (c == '&') o += "&amp;";
+        else if (c == '<') o += "&lt;";
+        else if (c == '>') o += "&gt;";
+        else o += c;
+    }
+    return o;
+}
+
+// A Quick Action: one "Run Shell Script" step that gets the selection as arguments.
+bool writeWorkflow(const Item& it, const std::string& exe) {
+    fs::path w = workflowPath(it);
+    std::string menu = std::string("Kompressor: ") + it.label;
+    std::string types = it.archivesOnly ? "<string>public.archive</string><string>public.zip-archive</string>"
+                                          "<string>org.7-zip.7-zip-archive</string><string>com.rarlab.rar-archive</string>"
+                                          "<string>public.disk-image</string><string>com.apple.installer-package-archive</string>"
+                                          "<string>public.data</string>"
+                                        : "<string>public.item</string>";
+    std::string info =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        "<plist version=\"1.0\"><dict>\n"
+        "<key>NSServices</key><array><dict>\n"
+        "<key>NSMenuItem</key><dict><key>default</key><string>" + xmlEsc(menu) + "</string></dict>\n"
+        "<key>NSMessage</key><string>runWorkflowAsService</string>\n"
+        "<key>NSRequiredContext</key><dict><key>NSApplicationIdentifier</key><string>com.apple.finder</string></dict>\n"
+        "<key>NSSendFileTypes</key><array>" + types + "</array>\n"
+        "</dict></array>\n"
+        "</dict></plist>\n";
+    std::string command = "exec " + quoted(exe) + " --shell " + it.action + " \"$@\"";
+    std::string wflow =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        "<plist version=\"1.0\"><dict>\n"
+        "<key>AMApplicationBuild</key><string>523</string>\n"
+        "<key>AMApplicationVersion</key><string>2.10</string>\n"
+        "<key>AMDocumentVersion</key><string>2</string>\n"
+        "<key>actions</key><array><dict><key>action</key><dict>\n"
+        "<key>AMAccepts</key><dict><key>Container</key><string>List</string><key>Optional</key><true/>"
+        "<key>Types</key><array><string>com.apple.cocoa.string</string></array></dict>\n"
+        "<key>AMActionVersion</key><string>2.0.3</string>\n"
+        "<key>AMApplication</key><array><string>Automator</string></array>\n"
+        "<key>AMParameterProperties</key><dict><key>COMMAND_STRING</key><dict/><key>CheckedForUserDefaultShell</key><dict/>"
+        "<key>inputMethod</key><dict/><key>shell</key><dict/><key>source</key><dict/></dict>\n"
+        "<key>AMProvides</key><dict><key>Container</key><string>List</string>"
+        "<key>Types</key><array><string>com.apple.cocoa.string</string></array></dict>\n"
+        "<key>ActionBundlePath</key><string>/System/Library/Automator/Run Shell Script.action</string>\n"
+        "<key>ActionName</key><string>Run Shell Script</string>\n"
+        "<key>ActionParameters</key><dict>\n"
+        "<key>COMMAND_STRING</key><string>" + xmlEsc(command) + "</string>\n"
+        "<key>CheckedForUserDefaultShell</key><true/>\n"
+        "<key>inputMethod</key><integer>1</integer>\n"
+        "<key>shell</key><string>/bin/sh</string>\n"
+        "<key>source</key><string></string>\n"
+        "</dict>\n"
+        "<key>BundleIdentifier</key><string>com.apple.RunShellScript</string>\n"
+        "<key>CFBundleVersion</key><string>2.0.3</string>\n"
+        "<key>CanShowSelectedItemsWhenRun</key><false/>\n"
+        "<key>CanShowWhenRun</key><true/>\n"
+        "<key>Category</key><array><string>AMCategoryUtilities</string></array>\n"
+        "<key>Class Name</key><string>RunShellScriptAction</string>\n"
+        "<key>InputUUID</key><string>5C2B1A7E-0D4E-4B4C-9E39-2C1F7A9D0001</string>\n"
+        "<key>Keywords</key><array><string>Shell</string><string>Script</string></array>\n"
+        "<key>OutputUUID</key><string>5C2B1A7E-0D4E-4B4C-9E39-2C1F7A9D0002</string>\n"
+        "<key>UUID</key><string>5C2B1A7E-0D4E-4B4C-9E39-2C1F7A9D0003</string>\n"
+        "<key>UnlocalizedApplications</key><array><string>Automator</string></array>\n"
+        "<key>arguments</key><dict/>\n"
+        "<key>isViewVisible</key><integer>1</integer>\n"
+        "</dict><key>isViewVisible</key><integer>1</integer></dict></array>\n"
+        "<key>connectors</key><dict/>\n"
+        "<key>workflowMetaData</key><dict>\n"
+        "<key>applicationBundleIDsByPath</key><dict/>\n"
+        "<key>applicationPaths</key><array/>\n"
+        "<key>inputTypeIdentifier</key><string>com.apple.Automator.fileSystemObject</string>\n"
+        "<key>outputTypeIdentifier</key><string>com.apple.Automator.nothing</string>\n"
+        "<key>presentationMode</key><integer>15</integer>\n"
+        "<key>processesInput</key><false/>\n"
+        "<key>serviceInputTypeIdentifier</key><string>com.apple.Automator.fileSystemObject</string>\n"
+        "<key>serviceOutputTypeIdentifier</key><string>com.apple.Automator.nothing</string>\n"
+        "<key>serviceProcessesInput</key><false/>\n"
+        "<key>systemImageName</key><string>NSActionTemplate</string>\n"
+        "<key>useAutomaticInputType</key><false/>\n"
+        "<key>workflowTypeIdentifier</key><string>com.apple.Automator.servicesMenu</string>\n"
+        "</dict>\n"
+        "</dict></plist>\n";
+    return writeFile(w / "Contents" / "Info.plist", info, false) && writeFile(w / "Contents" / "document.wflow", wflow, false);
+}
+
+void refreshServices() {
+    if (fork() == 0) {
+        execl("/System/Library/CoreServices/pbs", "pbs", "-update", (char*)nullptr);
+        _exit(0);
+    }
+}
+#else
+fs::path dataHome() {
+    const char* x = std::getenv("XDG_DATA_HOME");
+    return x && *x ? fs::path(x) : home() / ".local" / "share";
+}
+fs::path nautilusDir() { return dataHome() / "nautilus" / "scripts" / "Kompressor"; }
+fs::path nemoDir() { return dataHome() / "nemo" / "actions"; }
+std::vector<fs::path> dolphinFiles() {  // KDE 6, then KDE 5
+    return {dataHome() / "kio" / "servicemenus" / "kompressor.desktop",
+            dataHome() / "kservices5" / "ServiceMenus" / "kompressor.desktop"};
+}
+const char* kArchiveMimes =
+    "application/zip;application/x-7z-compressed;application/vnd.rar;application/x-rar;application/x-tar;"
+    "application/x-compressed-tar;application/x-bzip-compressed-tar;application/x-xz-compressed-tar;"
+    "application/x-zstd-compressed-tar;application/gzip;application/x-gzip;application/x-bzip2;application/x-xz;"
+    "application/zstd;application/x-lzma;application/x-lz4;application/x-iso9660-image;application/vnd.ms-cab-compressed;"
+    "application/x-rpm;application/vnd.debian.binary-package;application/x-cpio;application/java-archive;"
+    "application/vnd.android.package-archive;application/x-lha;application/x-xar;application/x-apple-diskimage;";
+
+std::string dolphinMenu(const std::string& exe, bool archives) {
+    std::string actions, body;
+    for (const Item& it : kItems) {
+        if (it.archivesOnly != archives) continue;
+        std::string id = it.action;
+        id.erase(std::remove(id.begin(), id.end(), '-'), id.end());
+        actions += id + ";";
+        body += "\n[Desktop Action " + id + "]\nName=" + it.label + "\nIcon=package-x-generic\nExec=" + quoted(exe) +
+                " --shell " + it.action + " %F\n";
+    }
+    return std::string("[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\n") +
+           "MimeType=" + (archives ? kArchiveMimes : "all/allfiles;inode/directory;") + "\n" +
+           "X-KDE-Submenu=Kompressor\nX-KDE-Priority=TopLevel\nActions=" + actions + "\n" + body;
+}
+#endif
+
+const char* kMarker = "# Kompressor right-click menu";
+
+}  // namespace
+
+bool supported() { return true; }
+
+bool registered() {
+    std::string exe = selfExe();
+#ifdef __APPLE__
+    std::string w = readFile(workflowPath(kItems[0]) / "Contents" / "document.wflow");
+    return !w.empty() && w.find(xmlEsc(quoted(exe))) != std::string::npos;
+#else
+    std::string sc = readFile(nautilusDir() / kItems[0].label);
+    std::string d = readFile(dolphinFiles()[0]);
+    return sc.find(quoted(exe)) != std::string::npos && d.find(quoted(exe)) != std::string::npos;
+#endif
+}
+
+bool unregisterMenu(std::string&) {
+    std::error_code ec;
+#ifdef __APPLE__
+    for (const Item& it : kItems) fs::remove_all(workflowPath(it), ec);
+    refreshServices();
+#else
+    fs::remove_all(nautilusDir(), ec);
+    for (auto& f : dolphinFiles()) {
+        fs::remove(f, ec);
+        fs::remove(f.parent_path() / "kompressor-archives.desktop", ec);
+    }
+    for (const Item& it : kItems) fs::remove(nemoDir() / (std::string("kompressor-") + it.action + ".nemo_action"), ec);
+#endif
+    prefs::setBool("ShellMenuOff", true);
+    return true;
+}
+
+bool registerMenu(std::string& err) {
+    std::string exe = selfExe();
+    if (exe.empty()) return err = "could not find Kompressor's own location", false;
+    std::string ignored;
+    unregisterMenu(ignored);
+    bool ok = true;
+#ifdef __APPLE__
+    for (const Item& it : kItems) ok = ok && writeWorkflow(it, exe);
+    refreshServices();
+#else
+    // Nautilus (GNOME Files): Scripts > Kompressor > ...
+    for (const Item& it : kItems)
+        ok = ok && writeFile(nautilusDir() / it.label,
+                             std::string("#!/bin/sh\n") + kMarker + "\nexec " + quoted(exe) + " --shell " + it.action + " \"$@\"\n", true);
+    // Dolphin (KDE): a Kompressor submenu; archives get a second file with their own entries.
+    for (auto& f : dolphinFiles()) {
+        ok = ok && writeFile(f, dolphinMenu(exe, false), true);
+        ok = ok && writeFile(f.parent_path() / "kompressor-archives.desktop", dolphinMenu(exe, true), true);
+    }
+    // Nemo (Cinnamon)
+    for (const Item& it : kItems)
+        ok = ok && writeFile(nemoDir() / (std::string("kompressor-") + it.action + ".nemo_action"),
+                             std::string("[Nemo Action]\nName=Kompressor: ") + it.label + "\nExec=" + quoted(exe) + " --shell " +
+                                 it.action + " %F\nIcon-Name=package-x-generic\nSelection=notnone\n" +
+                                 (it.archivesOnly ? std::string("Mimetypes=") + kArchiveMimes + "\n" : "Extensions=any;\n"),
+                             false);
+#endif
+    if (!ok) {
+        unregisterMenu(ignored);
+        return err = "could not write the menu entries", false;
+    }
+    prefs::setBool("ShellMenuOff", false);
+    return true;
+}
+
+void autoRegister() {
+    if (prefs::getBool("ShellMenuOff", false) || registered()) return;
+    std::string err;
+    registerMenu(err);
+}
+
 bool collectShellLaunch(const std::string&, std::vector<std::string>&) { return true; }
 
 #endif

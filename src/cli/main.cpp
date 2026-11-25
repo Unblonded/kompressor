@@ -57,8 +57,9 @@ static void usage() {
         "                         (a scratch drive until Ctrl+C; everything on it is deleted then)\n"
         "  kompressor-cli formats\n\n"
         "  create, super and convert also take -v <size> to split the result into parts (e.g. -v 100m, -v 4g)\n"
+        "  an output named .exe is a self-extracting 7z (Windows); name.zip.exe makes it a self-extracting ZIP\n"
         "  --max-cpu   maximum performance: every core at high priority, no power throttling, fastest power plan\n"
-        "  --gpu       let the graphics card search for matches too (ZIP; Windows)\n",
+        "  --gpu       let the graphics card search for matches too (ZIP, GZ, TAR.GZ; Windows)\n",
         KZ_VERSION);
 }
 
@@ -116,6 +117,16 @@ static kmp::Mode parseMode(const std::string& s) {
     if (s == "extreme") return kmp::Mode::Extreme;
     if (s == "ultimate") return kmp::Mode::Ultimate;
     return kmp::Mode::Ultra;
+}
+
+// The output format from a file name. "x.exe" is a self-extracting 7z, "x.zip.exe" a self-extracting ZIP.
+static bool outFormat(const std::string& name, kz::CompressOptions& o) {
+    if (kz::lowerExt(name) == "exe") {
+        o.selfExtracting = true;
+        if (!kz::formatFromFileName(name.substr(0, name.size() - 4), o.format)) o.format = kz::OutFormat::SevenZip;
+        return true;
+    }
+    return kz::formatFromFileName(name, o.format);
 }
 
 int main(int argc, char** argv) {
@@ -427,7 +438,7 @@ int main(int argc, char** argv) {
             if (lowerExt(out) != "kmp") out += ".kmp";
             o.level = (int)parseMode(mode);
         } else {
-            if (!formatFromFileName(out, o.format)) {
+            if (!outFormat(out, o)) {
                 std::fprintf(stderr, "error: cannot tell the format from '%s' (try .zip .7z .tar.xz .tar.zst .kmp ...)\n",
                              out.c_str());
                 return 1;
@@ -457,7 +468,7 @@ int main(int argc, char** argv) {
         if (pos.size() < 2) return usage(), 1;
         Source src{pos[0], nullptr, ""};
         CompressOptions o;
-        if (!formatFromFileName(pos[1], o.format)) {
+        if (!outFormat(pos[1], o)) {
             std::fprintf(stderr, "error: cannot tell the format from '%s' (try .zip .7z .tar.xz .tar.zst .kmp ...)\n",
                          pos[1].c_str());
             return 1;
