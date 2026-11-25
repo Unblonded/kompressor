@@ -1463,17 +1463,18 @@ static bool sfxCheck(const CompressOptions& opt, std::string& err) {
     if (!sfxSupported()) err = "This build of Kompressor can't make self-extracting archives (Windows only).";
     else if (opt.volumeSize) err = "A self-extracting archive can't also be split into parts.";
     else if (!sfxFormatOk(opt.format))
-        err = std::string("A self-extracting archive can't hold a ") + formatDesc(opt.format).name + "; use 7z or ZIP.";
+        err = std::string("A self-extracting archive can't hold a ") + formatDesc(opt.format).name + ".";
     return err.empty();
 }
 
 // Splits a finished archive into volumes when asked to, and records which files were written.
 static bool finishOutput(const std::string& outPath, const CompressOptions& opt, Progress& prog, CompressResult& res,
-                         std::string& err) {
+                         std::string& err, const std::string& innerName = {}) {
     res.parts.clear();
     if (opt.selfExtracting) {
         prog.setStatus("Making it self-extracting");
-        if (!makeSelfExtracting(outPath, !opt.password.empty(), err)) return false;
+        if (!makeSelfExtracting(outPath, !opt.password.empty(), formatDesc(opt.format).singleFile ? innerName : std::string(), err))
+            return false;
         res.outputBytes = fileSize(outPath);
         res.summary = ratioText(res.inputBytes, res.outputBytes) + ", self-extracting";
     }
@@ -1490,7 +1491,8 @@ static bool finishOutput(const std::string& outPath, const CompressOptions& opt,
 
 bool createArchive(const std::vector<std::string>& inputs, const std::string& outPath, const CompressOptions& opt,
                    Progress& prog, CompressResult& res, std::string& err) {
-    return sfxCheck(opt, err) && createWhole(inputs, outPath, opt, prog, res, err) && finishOutput(outPath, opt, prog, res, err);
+    std::string inner = inputs.size() == 1 ? fileNameOf(inputs[0]) : std::string();  // a single compressed file's name
+    return sfxCheck(opt, err) && createWhole(inputs, outPath, opt, prog, res, err) && finishOutput(outPath, opt, prog, res, err, inner);
 }
 
 bool convertArchive(const Source& src, const std::string& outPath, const CompressOptions& opt, const std::string& password,

@@ -221,9 +221,10 @@ if(KOMPRESSOR_BUILD_GUI)
   if(WIN32)
     add_executable(kz-sfx WIN32 src/sfx/sfx_main.cpp src/gui/theme.cpp src/gui/chrome.cpp src/gui/app_icon.cpp
                    src/gui/window_frame.cpp packaging/windows/kz-sfx.rc)
-    target_include_directories(kz-sfx PRIVATE src/gui)
+    target_include_directories(kz-sfx PRIVATE src/gui src/core)
     target_compile_definitions(kz-sfx PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
-    target_link_libraries(kz-sfx PRIVATE imgui LibArchive::LibArchive LibLZMA::LibLZMA ZLIB::ZLIB ${KZ_ZSTD_TARGET}
+    # kompressor_core for the KMP reader; the linker takes only what the stub uses.
+    target_link_libraries(kz-sfx PRIVATE imgui kompressor_core LibArchive::LibArchive LibLZMA::LibLZMA ZLIB::ZLIB ${KZ_ZSTD_TARGET}
                           dwmapi shell32 ole32 user32 gdi32)
     if(TARGET BZip2::BZip2)
       target_link_libraries(kz-sfx PRIVATE BZip2::BZip2)

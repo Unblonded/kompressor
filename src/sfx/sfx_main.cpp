@@ -1,8 +1,10 @@
 // Kompressor self-extractor: the small program at the front of a self-extracting .exe.
 //
-// The file is laid out as [this program][an archive][trailer]. The trailer (the last 32 bytes) says
-// where the archive starts, so the program reads its own file, asks where to put the files and
-// extracts them with libarchive. Any format libarchive reads works; Kompressor writes 7z or ZIP.
+// The file is laid out as [this program][name][an archive][trailer]. The trailer (the last 32 bytes)
+// says where the archive starts, so the program reads its own file, asks where to put the files and
+// extracts them: KMP with Kompressor's own reader, everything else (ZIP, 7z, RAR, TAR and its
+// compressed kinds, ISO, CPIO, and single compressed files) with libarchive. `name` is only there for
+// a single compressed file (.gz, .xz ...), which doesn't record what the file was called.
 //
 //   name.exe               asks where to extract (default: a folder named after the .exe beside it)
 //   name.exe -y            extracts there without asking
@@ -39,6 +41,7 @@
 #include <thread>
 #include <vector>
 
+#include "kmp.hpp"
 #include "app_icon.hpp"
 #include "chrome.hpp"
 #include "native_files.hpp"
@@ -53,9 +56,11 @@ constexpr uint32_t kFlagEncrypted = 1;
 struct Trailer {
     uint64_t offset = 0, size = 0;
     uint32_t flags = 0;
+    uint32_t nameLen = 0;  // a single compressed file's name, stored just before the archive
 };
 
 std::wstring g_self, g_title;
+std::wstring g_inner;  // that name (UTF-16), empty for real archives
 Trailer g_tr;
 
 std::string toUtf8(const std::wstring& w) {
@@ -85,12 +90,21 @@ bool readTrailer(const std::wstring& path, Trailer& t) {
         ok = SetFilePointerEx(h, at, nullptr, FILE_BEGIN) && ReadFile(h, b, 32, &got, nullptr) && got == 32 &&
              std::memcmp(b, kMagic, 8) == 0;
     }
+    if (ok) {
+        std::memcpy(&t.offset, b + 8, 8);
+        std::memcpy(&t.size, b + 16, 8);
+        std::memcpy(&t.flags, b + 24, 4);
+        std::memcpy(&t.nameLen, b + 28, 4);
+        ok = t.offset + t.size + 32 == (uint64_t)size.QuadPart && t.nameLen <= 4096 && t.nameLen <= t.offset;
+    }
+    if (ok && t.nameLen) {
+        std::string name(t.nameLen, '\0');
+        at.QuadPart = (LONGLONG)(t.offset - t.nameLen);
+        ok = SetFilePointerEx(h, at, nullptr, FILE_BEGIN) && ReadFile(h, name.data(), t.nameLen, &got, nullptr) && got == t.nameLen;
+        if (ok) g_inner = fromUtf8(name.c_str());
+    }
     CloseHandle(h);
-    if (!ok) return false;
-    std::memcpy(&t.offset, b + 8, 8);
-    std::memcpy(&t.size, b + 16, 8);
-    std::memcpy(&t.flags, b + 24, 4);
-    return t.offset + t.size + 32 == (uint64_t)size.QuadPart;
+    return ok;
 }
 
 // libarchive reads the archive straight out of this .exe, through these callbacks.
@@ -158,7 +172,95 @@ struct Job {
     std::wstring error;
 };
 
+// Unix seconds to a FILETIME.
+FILETIME fileTime(int64_t unix) {
+    ULARGE_INTEGER u;
+    u.QuadPart = (ULONGLONG)((unix + 11644473600LL) * 10000000LL);
+    FILETIME ft{u.LowPart, u.HighPart};
+    return ft;
+}
+
+bool isKmp() {
+    HANDLE h = CreateFileW(g_self.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    uint8_t m[8] = {};
+    DWORD got = 0;
+    LARGE_INTEGER at;
+    at.QuadPart = (LONGLONG)g_tr.offset;
+    bool ok = g_tr.size >= 8 && SetFilePointerEx(h, at, nullptr, FILE_BEGIN) && ReadFile(h, m, 8, &got, nullptr) && got == 8 &&
+              std::memcmp(m, "KMPR\x1A\r\n\0", 8) == 0;
+    CloseHandle(h);
+    return ok;
+}
+
+// Kompressor's own format, read with its own reader (blocks are decoded on every core).
+void extractKmp(Job& job, const std::wstring& base) {
+    kz::kmp::Reader rd;
+    std::string err;
+    if (!rd.openEmbedded(toUtf8(g_self), g_tr.offset, g_tr.size, err)) {
+        job.error = fromUtf8(err.c_str());
+        return;
+    }
+    kz::Progress prog;
+    rd.setSequential(&prog);
+    auto progress = [&] {
+        uint64_t t = prog.workTotal.load();
+        job.done = t ? (uint64_t)((double)prog.workDone.load() / (double)t * (double)g_tr.size) : 0;
+        if (job.cancel.load()) prog.cancel = true;
+    };
+    bool ok = true;
+    const auto& entries = rd.entries();
+    for (size_t i = 0; i < entries.size() && ok; ++i) {
+        const kz::kmp::Entry& e = entries[i];
+        std::wstring name = fromUtf8(e.path.c_str());
+        std::replace(name.begin(), name.end(), L'/', L'\\');
+        if (!safeName(name) || e.type == kz::kmp::EntryType::Symlink) continue;
+        std::wstring full = base + L"\\" + name;
+        if (e.type == kz::kmp::EntryType::Dir) {
+            SHCreateDirectoryExW(nullptr, full.c_str(), nullptr);
+            continue;
+        }
+        size_t cut = full.find_last_of(L'\\');
+        if (cut != std::wstring::npos) SHCreateDirectoryExW(nullptr, full.substr(0, cut).c_str(), nullptr);
+        HANDLE f = CreateFileW(full.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f == INVALID_HANDLE_VALUE) {
+            job.error = L"Can't write " + full;
+            ok = false;
+            break;
+        }
+        bool wrote = true;
+        ok = rd.readFile(i, [&](const uint8_t* p, size_t n) {
+            DWORD put = 0;
+            if (!WriteFile(f, p, (DWORD)n, &put, nullptr) || put != n) wrote = false;
+            progress();
+            return wrote && !job.cancel.load();
+        }, &prog, err);
+        if (ok && wrote && e.mtime) {
+            FILETIME ft = fileTime(e.mtime);
+            SetFileTime(f, nullptr, nullptr, &ft);
+        }
+        CloseHandle(f);
+        if (!wrote) {
+            job.error = L"Can't write " + full + L" (disk full?)";
+            ok = false;
+        } else if (!ok && !job.cancel.load()) {
+            job.error = fromUtf8(err.c_str());
+        }
+        if (ok) job.files++;
+    }
+    progress();
+    job.ok = ok && !job.cancel.load();
+    if (job.cancel.load()) job.error = L"Cancelled.";
+}
+
 void extract(Job& job) {
+    if (isKmp()) {
+        std::wstring base = job.dest;
+        while (!base.empty() && (base.back() == L'\\' || base.back() == L'/')) base.pop_back();
+        SHCreateDirectoryExW(nullptr, base.c_str(), nullptr);
+        extractKmp(job, base);
+        return;
+    }
     Region rg;
     rg.h = CreateFileW(g_self.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     rg.base = g_tr.offset;
@@ -172,11 +274,17 @@ void extract(Job& job) {
     archive* a = archive_read_new();
     archive_read_support_format_7zip(a);
     archive_read_support_format_zip(a);
+    archive_read_support_format_rar5(a);
+    archive_read_support_format_rar(a);
     archive_read_support_format_tar(a);
+    archive_read_support_format_cpio(a);
+    archive_read_support_format_iso9660(a);
+    archive_read_support_format_raw(a);  // a single compressed file; only when nothing else matches
     archive_read_support_filter_gzip(a);
     archive_read_support_filter_bzip2(a);
     archive_read_support_filter_xz(a);
     archive_read_support_filter_zstd(a);
+    archive_read_support_filter_lz4(a);
     if (!job.password.empty()) archive_read_add_passphrase(a, toUtf8(job.password).c_str());
     archive_read_set_read_callback(a, regionRead);
     archive_read_set_seek_callback(a, regionSeek);
@@ -214,6 +322,14 @@ void extract(Job& job) {
         }
         const wchar_t* nm = archive_entry_pathname_w(e);
         std::wstring name = nm ? nm : fromUtf8(archive_entry_pathname_utf8(e));
+        if (archive_format(a) == ARCHIVE_FORMAT_RAW) {  // a lone compressed file: use the name it was made from
+            name = g_inner;
+            if (name.empty()) {
+                name = g_title;
+                size_t dot = name.find_last_of(L'.');
+                if (dot != std::wstring::npos && dot > 0) name.resize(dot);
+            }
+        }
         if (!safeName(name)) continue;  // never write outside the chosen folder
         archive_entry_copy_pathname_w(e, (base + L"\\" + name).c_str());
         if (const wchar_t* hl = archive_entry_hardlink_w(e)) {
@@ -225,7 +341,7 @@ void extract(Job& job) {
             fail(w);
             break;
         }
-        if (archive_entry_size(e) > 0) {
+        if (archive_entry_size(e) > 0 || !archive_entry_size_is_set(e)) {  // a lone compressed file's size isn't known
             const void* buf;
             size_t len;
             la_int64_t off;
@@ -266,10 +382,15 @@ void extract(Job& job) {
 
 std::wstring defaultDest() {
     std::wstring d = g_self;
+    if (!g_inner.empty()) {  // a single file goes next to the .exe
+        size_t slash = d.find_last_of(L"\\/");
+        return slash == std::wstring::npos ? L"." : d.substr(0, slash);
+    }
     size_t dot = d.find_last_of(L'.'), slash = d.find_last_of(L"\\/");
     if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) d.resize(dot);
     // "photos.zip.exe" -> "photos"
-    for (const wchar_t* x : {L".zip", L".7z", L".tar", L".tar.gz", L".tar.xz", L".tar.zst", L".tar.bz2"}) {
+    for (const wchar_t* x : {L".zip", L".7z", L".rar", L".kmp", L".iso", L".cpio", L".tar", L".tar.gz", L".tar.xz",
+                             L".tar.zst", L".tar.bz2", L".tar.lz4"}) {
         size_t n = wcslen(x);
         if (d.size() > n && _wcsicmp(d.c_str() + d.size() - n, x) == 0) {
             d.resize(d.size() - n);
@@ -460,7 +581,10 @@ void drawUi() {
     auto alignEnd = [&](float width) { ImGui::SetCursorPosX(W - pad - width); };
     std::string name = toUtf8(g_title);  // "photos.exe" -> "photos"
     if (name.size() > 4 && _stricmp(name.c_str() + name.size() - 4, ".exe") == 0) name.resize(name.size() - 4);
-    for (const char* x : {".zip", ".7z", ".tar.gz", ".tar.xz", ".tar.zst", ".tar.bz2", ".tar"}) {
+    if (!g_inner.empty()) name = toUtf8(g_inner);  // a single compressed file: its own name
+    for (const char* x : {".zip", ".7z", ".rar", ".kmp", ".iso", ".cpio", ".tar.gz", ".tar.xz", ".tar.zst", ".tar.bz2",
+                          ".tar.lz4", ".tar", ".gz", ".bz2", ".xz", ".zst", ".lz4"}) {
+        if (!g_inner.empty()) break;
         size_t n = std::strlen(x);
         if (name.size() > n && _stricmp(name.c_str() + name.size() - n, x) == 0) {
             name.resize(name.size() - n);

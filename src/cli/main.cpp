@@ -60,7 +60,7 @@ static void usage() {
         "                         (a scratch drive until Ctrl+C; everything on it is deleted then)\n"
         "  kompressor-cli formats\n\n"
         "  create, super and convert also take -v <size> to split the result into parts (e.g. -v 100m, -v 4g)\n"
-        "  an output named .exe is a self-extracting 7z (Windows); name.zip.exe makes it a self-extracting ZIP\n"
+        "  an output named .exe is a self-extracting 7z (Windows); name.zip.exe, name.kmp.exe ... pick the format inside\n"
         "  --max-cpu   maximum performance: every core at high priority, no power throttling, fastest power plan\n"
         "  --gpu       let the graphics card search for matches too (ZIP, GZ, TAR.GZ; Windows)\n",
         KZ_VERSION);
@@ -453,7 +453,8 @@ int main(int argc, char** argv) {
         std::string out = pos[0];
         if (cmd == "super" || cmd == "s") {
             o.format = OutFormat::Kmp;
-            if (lowerExt(out) != "kmp") out += ".kmp";
+            if (lowerExt(out) == "exe") o.selfExtracting = true;  // a self-extracting KMP
+            else if (lowerExt(out) != "kmp") out += ".kmp";
             o.level = (int)parseMode(mode);
         } else {
             if (!outFormat(out, o)) {

@@ -1,5 +1,6 @@
 #include "kz_sfx.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -40,17 +41,8 @@ bool sfxSupported() {
     return stub(p, n);
 }
 
-bool sfxFormatOk(OutFormat f) {
-    switch (f) {
-        case OutFormat::Zip:
-        case OutFormat::SevenZip:
-        case OutFormat::Tar:
-        case OutFormat::TarGz:
-        case OutFormat::TarBz2:
-        case OutFormat::TarXz:
-        case OutFormat::TarZst: return true;
-        default: return false;
-    }
+bool sfxFormatOk(OutFormat) {
+    return true;  // the extractor reads every format Kompressor writes
 }
 
 std::string sfxPathFor(const std::string& archivePath) {
@@ -58,7 +50,7 @@ std::string sfxPathFor(const std::string& archivePath) {
     return pathToUtf8(p.parent_path() / u8path(stripArchiveExt(fileNameOf(archivePath)) + ".exe"));
 }
 
-bool makeSelfExtracting(const std::string& path, bool encrypted, std::string& err) {
+bool makeSelfExtracting(const std::string& path, bool encrypted, const std::string& innerName, std::string& err) {
     const uint8_t* sp = nullptr;
     size_t sn = 0;
     if (!stub(sp, sn)) {
@@ -73,6 +65,8 @@ bool makeSelfExtracting(const std::string& path, bool encrypted, std::string& er
         return false;
     }
     out.write((const char*)sp, (std::streamsize)sn);
+    uint32_t nameLen = (uint32_t)std::min<size_t>(innerName.size(), 4096);
+    out.write(innerName.data(), nameLen);
     std::vector<char> buf(4 << 20);
     uint64_t size = 0;
     while (in) {
@@ -83,12 +77,13 @@ bool makeSelfExtracting(const std::string& path, bool encrypted, std::string& er
         size += (uint64_t)got;
     }
     uint8_t t[32] = {};
-    uint64_t off = sn;
+    uint64_t off = sn + nameLen;
     uint32_t flags = encrypted ? kFlagEncrypted : 0;
     std::memcpy(t, kMagic, 8);
     std::memcpy(t + 8, &off, 8);
     std::memcpy(t + 16, &size, 8);
     std::memcpy(t + 24, &flags, 4);
+    std::memcpy(t + 28, &nameLen, 4);
     out.write((const char*)t, 32);
     in.close();
     out.close();

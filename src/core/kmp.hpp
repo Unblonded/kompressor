@@ -97,6 +97,8 @@ public:
     Reader();
     ~Reader();
     bool open(const Source& src, std::string& err);
+    // An archive stored inside a bigger file, `size` bytes from `offset` (a self-extracting .exe).
+    bool openEmbedded(const std::string& path, uint64_t offset, uint64_t size, std::string& err);
     const std::vector<Entry>& entries() const;
     const Stats& stats() const;
     Mode mode() const;
@@ -111,6 +113,7 @@ public:
     void setSequential(Progress* prog = nullptr);
 
 private:
+    bool load(std::string& err);
     struct Impl;
     std::unique_ptr<Impl> d;
 };

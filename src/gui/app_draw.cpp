@@ -2302,7 +2302,7 @@ void App::drawCompressWindow() {
         ImGui::SetItemTooltip("%s", fits ? "Makes a program that extracts the files with a double-click, on any Windows PC "
                                            "without Kompressor. Run it with -y to extract beside it without asking, or "
                                            "-o<folder> to choose where."
-                                         : "Choose 7z, ZIP or a TAR format for a self-extracting archive.");
+                                         : "This format can't be made self-extracting.");
         if (on && cmp_.out[0]) {
             ImGui::SameLine(0, em * 0.6f);
             ImGui::AlignTextToFramePadding();

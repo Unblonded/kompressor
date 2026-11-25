@@ -927,6 +927,7 @@ struct Reader::Impl {
     struct Part {
         std::string path;
         uint64_t offset = 0, size = 0;
+        uint64_t fileBase = 0;  // where the part's bytes start in its file
         std::ifstream f;
     };
     std::vector<Part> parts;
@@ -974,7 +975,7 @@ struct Reader::Impl {
             size_t take = (size_t)std::min<uint64_t>(n, p.size - within);
             if (!p.f.is_open()) p.f.open(u8path(p.path), std::ios::binary);
             p.f.clear();
-            p.f.seekg((std::streamoff)within);
+            p.f.seekg((std::streamoff)(within + p.fileBase));
             p.f.read((char*)out, (std::streamsize)take);
             if ((size_t)p.f.gcount() != take) return false;
             out += take;
@@ -1109,6 +1110,20 @@ bool Reader::open(const Source& src, std::string& err) {
             d->size += sz;
         }
     }
+    return load(err);
+}
+
+bool Reader::openEmbedded(const std::string& path, uint64_t offset, uint64_t size, std::string& err) {
+    d->src.path = path;
+    d->parts.resize(1);
+    d->parts[0].path = path;
+    d->parts[0].size = size;
+    d->parts[0].fileBase = offset;
+    d->size = size;
+    return load(err);
+}
+
+bool Reader::load(std::string& err) {
     if (d->size < kHeaderSize + kFooterSize) {
         err = "file too small to be a KMP archive";
         return false;

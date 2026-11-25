@@ -16,8 +16,9 @@ bool sfxSupported();
 // Whether the extractor can read this format (7z, ZIP and the TAR family; not KMP or single files).
 bool sfxFormatOk(OutFormat f);
 // Turns the finished archive at `path` into a self-extracting program, in place. `encrypted` makes
-// the extractor ask for a password.
-bool makeSelfExtracting(const std::string& path, bool encrypted, std::string& err);
+// the extractor ask for a password. `innerName` is the file's name for a single compressed file
+// (.gz, .xz ...), which doesn't record it; empty for real archives.
+bool makeSelfExtracting(const std::string& path, bool encrypted, const std::string& innerName, std::string& err);
 // Where a self-extracting version of an archive goes: "C:/x/photos.7z" -> "C:/x/photos.exe".
 std::string sfxPathFor(const std::string& archivePath);
 
