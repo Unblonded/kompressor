@@ -98,6 +98,9 @@ kz-log.txt.lz4	data/log.txt>kz-log.txt
 7z-bcj2.7z	all
 7z-ppmd.7z	all
 7z-pw.7z	all
+7z-pw-names.7z	all
+7z-pw-bcj.7z	all
+7z-pw-lzma.7z	all
 7z-deflate64.zip	all
 7z-ppmd.zip	all
 7z-aes-pw.zip	all

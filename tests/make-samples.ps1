@@ -154,6 +154,12 @@ if (Test-Path $Cli) {
 "7-Zip"
 $sz = @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $sz) { $sz = (Get-Command 7z -ErrorAction SilentlyContinue).Source }
+# vcpkg keeps a copy of 7-Zip for its own use; good enough to write samples with.
+if (-not $sz) {
+    $sz = @("$env:USERPROFILE\vcpkg\downloads\tools", "$env:LOCALAPPDATA\vcpkg\downloads\tools", "$env:VCPKG_ROOT\downloads\tools") |
+        Where-Object { $_ -and (Test-Path $_) } | ForEach-Object { Get-ChildItem $_ -Filter 7z.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue } |
+        Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+}
 if ($sz) {
     Push-Location $corpus
     $s7 = @(
@@ -161,6 +167,9 @@ if ($sz) {
         @('7z-bcj2.7z', @('-t7z', '-mf=BCJ2')),
         @('7z-ppmd.7z', @('-t7z', '-m0=PPMd')),
         @('7z-pw.7z', @('-t7z', "-p$pw", '-mhe=on')),
+        @('7z-pw-names.7z', @('-t7z', "-p$pw", '-mhe=off')),
+        @('7z-pw-bcj.7z', @('-t7z', "-p$pw", '-mhe=on', '-mf=BCJ', '-mx=9')),
+        @('7z-pw-lzma.7z', @('-t7z', "-p$pw", '-mhe=on', '-m0=LZMA')),
         @('7z-deflate64.zip', @('-tzip', '-mm=Deflate64')),
         @('7z-ppmd.zip', @('-tzip', '-mm=PPMd')),
         @('7z-aes-pw.zip', @('-tzip', "-p$pw", '-mem=AES256')),

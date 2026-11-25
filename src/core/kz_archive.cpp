@@ -12,6 +12,7 @@
 #include <regex>
 
 #include "kmp.hpp"
+#include "kz_7z.hpp"
 #include "kz_native.hpp"
 #include "kz_sniff.hpp"
 
@@ -596,6 +597,46 @@ bool nativeTest(const native::Container& c, const Source& src, Progress& prog, s
     return true;
 }
 
+// 7z archives libarchive can't decrypt are read by kz_7z. 0: not one; 1: opened into `c`; -1: failed
+// (err says why; a missing or wrong password also sets prog.needPassword).
+int open7z(const Source& src, const std::string& password, bool reading, native::Container& c, bool& encrypted,
+           Progress& prog, std::string& err) {
+    encrypted = false;
+    if (!sevenzip::handles(src)) return 0;
+    bool needPw = false;
+    if (sevenzip::open(src, password, reading, c, encrypted, needPw, err)) return 1;
+    if (needPw) prog.needPassword = true;
+    return -1;
+}
+
+bool nativeVisit(const native::Container& c, const Source& src, EntryVisitor& v, Progress& prog, std::string& err) {
+    uint64_t total = 0;
+    for (auto& it : c.items)
+        if (!it.isDir) total += it.size;
+    prog.total = total;
+    for (auto& it : c.items) {
+        if (it.isDir) continue;
+        if (!v.begin(it.path, it.size)) {
+            prog.done += it.size;
+            continue;
+        }
+        prog.setStatus(it.path);
+        std::string ferr;
+        bool stopped = false;
+        bool ok = native::readItem(src, it, [&](const uint8_t* p, size_t n) {
+            prog.done += n;
+            if (!v.data(p, n) || prog.cancelled()) stopped = true;
+            return !stopped;
+        }, ferr);
+        if (stopped) {
+            err = "Cancelled";
+            return false;
+        }
+        v.end(ok, ferr);
+    }
+    return true;
+}
+
 }  // namespace
 
 // ============================================================================ public API
@@ -625,6 +666,19 @@ bool probeArchive(const Source& src, std::string& formatName) {
 bool listArchive(const Source& src, ArchiveInfo& out, const std::string& password, Progress& prog, std::string& err) {
     out = ArchiveInfo();
     if (kmp::isKmp(src)) return kmpList(src, out, err);
+    {
+        native::Container c;
+        bool enc = false;
+        int r = open7z(src, password, false, c, enc, prog, err);
+        if (r < 0) return false;
+        if (r > 0) {
+            nativeList(c, src, out);
+            out.filter = "none";
+            out.hasEncrypted = enc;
+            for (auto& e : out.entries) e.encrypted = enc && !e.isDir;
+            return true;
+        }
+    }
 
     LaReader r;
     if (!r.open(src, password, err)) {
@@ -693,6 +747,13 @@ bool listArchive(const Source& src, ArchiveInfo& out, const std::string& passwor
 
 bool extractArchive(const Source& src, const ExtractOptions& opt, Progress& prog, std::string& err) {
     if (kmp::isKmp(src)) return kmpExtract(src, opt, prog, err);
+    {
+        native::Container c;
+        bool enc = false;
+        int r = open7z(src, opt.password, true, c, enc, prog, err);
+        if (r < 0) return false;
+        if (r > 0) return nativeExtract(c, src, opt, prog, err);
+    }
 
     LaReader r;
     if (!r.open(src, opt.password, err)) {
@@ -813,6 +874,13 @@ bool extractArchive(const Source& src, const ExtractOptions& opt, Progress& prog
 bool readEntry(const Source& src, const std::string& entryPath, const std::string& password, uint64_t maxBytes,
                std::vector<uint8_t>& out, bool& truncated, Progress& prog, std::string& err) {
     if (kmp::isKmp(src)) return kmpRead(src, entryPath, maxBytes, out, truncated, prog, err);
+    {
+        native::Container c;
+        bool enc = false;
+        int r = open7z(src, password, true, c, enc, prog, err);
+        if (r < 0) return false;
+        if (r > 0) return nativeRead(c, src, entryPath, maxBytes, out, truncated, prog, err);
+    }
 
     out.clear();
     truncated = false;
@@ -871,6 +939,13 @@ bool readEntry(const Source& src, const std::string& entryPath, const std::strin
 
 bool testArchive(const Source& src, const std::string& password, Progress& prog, std::string& err) {
     if (kmp::isKmp(src)) return kmpTest(src, prog, err);
+    {
+        native::Container c;
+        bool enc = false;
+        int r = open7z(src, password, true, c, enc, prog, err);
+        if (r < 0) return false;
+        if (r > 0) return nativeTest(c, src, prog, err);
+    }
 
     LaReader r;
     if (!r.open(src, password, err)) {
@@ -958,6 +1033,13 @@ bool visitEntries(const Source& src, const std::string& password, EntryVisitor& 
         return true;
     }
 
+    {
+        native::Container c;
+        bool enc = false;
+        int r7 = open7z(src, password, true, c, enc, prog, err);
+        if (r7 < 0) return false;
+        if (r7 > 0) return nativeVisit(c, src, v, prog, err);
+    }
     LaReader r;
     if (!r.open(src, password, err)) {
         if (mentionsPassword(err)) prog.needPassword = true;
@@ -965,31 +1047,7 @@ bool visitEntries(const Source& src, const std::string& password, EntryVisitor& 
         std::string nerr;
         if (prog.needPassword || !native::open(src, c, nerr)) return false;
         err.clear();
-        uint64_t total = 0;
-        for (auto& it : c.items)
-            if (!it.isDir) total += it.size;
-        prog.total = total;
-        for (auto& it : c.items) {
-            if (it.isDir) continue;
-            if (!v.begin(it.path, it.size)) {
-                prog.done += it.size;
-                continue;
-            }
-            prog.setStatus(it.path);
-            std::string ferr;
-            bool stopped = false;
-            bool ok = native::readItem(src, it, [&](const uint8_t* p, size_t n) {
-                prog.done += n;
-                if (!v.data(p, n) || prog.cancelled()) stopped = true;
-                return !stopped;
-            }, ferr);
-            if (stopped) {
-                err = "Cancelled";
-                return false;
-            }
-            v.end(ok, ferr);
-        }
-        return true;
+        return nativeVisit(c, src, v, prog, err);
     }
     prog.total = sourceSize(src);
     archive_entry* e;

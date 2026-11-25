@@ -9,7 +9,7 @@ endif()
 # known from the start, not enabled later, or CMake's generator misses its rules.
 set(KZ_LANGUAGES C CXX)
 if(CMAKE_HOST_APPLE)
-  list(APPEND KZ_LANGUAGES OBJCXX)
+  list(APPEND KZ_LANGUAGES OBJC OBJCXX)  # OBJC too, or GLFW's .m files are built as C++
 endif()
 project(Kompressor VERSION 2.1.0 LANGUAGES ${KZ_LANGUAGES})
 
@@ -86,6 +86,7 @@ add_library(kompressor_core STATIC
   src/core/kz_ramdrive.cpp
   src/core/kz_sfx.cpp
   src/core/kz_crypto.cpp
+  src/core/kz_7z.cpp
   src/core/kz_writer.cpp
   src/core/kmp.cpp
   src/core/kz_parallel.cpp
