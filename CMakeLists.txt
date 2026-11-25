@@ -84,6 +84,7 @@ add_library(kompressor_core STATIC
   src/core/kz_hash.cpp
   src/core/kz_search.cpp
   src/core/kz_ramdrive.cpp
+  src/core/kz_memdisk.cpp
   src/core/kz_sfx.cpp
   src/core/kz_crypto.cpp
   src/core/kz_7z.cpp
@@ -135,7 +136,7 @@ endif()
 target_compile_definitions(kompressor_core PUBLIC KZ_VERSION="${PROJECT_VERSION}")
 if(WIN32)
   target_compile_definitions(kompressor_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
-  target_link_libraries(kompressor_core PUBLIC shell32 powrprof ole32 advapi32 virtdisk)
+  target_link_libraries(kompressor_core PUBLIC shell32 powrprof ole32 advapi32 iscsidsc ws2_32)
 endif()
 if(MSVC)
   target_compile_options(kompressor_core PUBLIC /utf-8 /W3)

@@ -1,8 +1,8 @@
 // A fast scratch drive that disappears when it stops, made with what each system has built in:
-//  - Windows: a local NTFS drive (under "Devices and drives") on a temporary virtual disk (VHDX).
-//    Attaching one needs administrator rights, so an elevated copy of this program holds it and
-//    detaches it when the drive stops or this program exits, however it exits. The disk lives in a
-//    temporary file that Windows caches in memory; it is deleted afterwards.
+//  - Windows: a local NTFS drive (under "Devices and drives") whose blocks are held in RAM by an
+//    elevated copy of this program (kz_memdisk) and attached through Windows' own iSCSI initiator
+//    over 127.0.0.1. That copy holds it and detaches it when the drive stops or this program exits,
+//    however it exits; the memory goes with it.
 //  - macOS: a real RAM disk (hdiutil ram://), shown in Finder as a volume.
 //  - Linux: a folder in /dev/shm, which is memory.
 #pragma once
@@ -31,7 +31,7 @@ public:
     uint64_t used() const;
     bool hasFiles() const;  // anything the user put there
 
-    // What the drive is, for the UI ("a local drive on a temporary virtual disk" ...).
+    // What the drive is, for the UI ("a local drive held in memory" ...).
     static const char* kind();
     static bool needsAdmin();
 

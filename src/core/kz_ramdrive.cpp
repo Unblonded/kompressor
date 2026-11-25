@@ -3,8 +3,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
-#include <initguid.h>  // defines VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT here
-#include <virtdisk.h>
+#include <iscsierr.h>  // ISDSC_STATUS, which iscsidsc.h uses but doesn't include
+#include <iscsidsc.h>
 #include <winioctl.h>
 #else
 #include <spawn.h>
@@ -27,6 +27,7 @@ extern char** environ;
 #include <thread>
 
 #include "kz_common.hpp"
+#include "kz_memdisk.hpp"
 
 namespace kz {
 
@@ -148,7 +149,6 @@ struct RamDrive::Impl {
     uint64_t cap = 0;
 #ifdef _WIN32
     HANDLE helper = nullptr, stopEvent = nullptr;
-    std::wstring vhdx;
 #elif defined(__APPLE__)
     std::string dev;
 #else
@@ -164,7 +164,7 @@ RamDrive::~RamDrive() { stop(); }
 
 const char* RamDrive::kind() {
 #ifdef _WIN32
-    return "a local drive on a temporary virtual disk";
+    return "a local drive held in memory";
 #elif defined(__APPLE__)
     return "a RAM disk";
 #else
@@ -183,10 +183,66 @@ bool RamDrive::needsAdmin() {
 // ============================================================================================ Windows
 #ifdef _WIN32
 
+namespace {
+
+std::string iscsiError(DWORD code) {
+    // The initiator's own codes have their text in iscsidsc.dll.
+    wchar_t* msg = nullptr;
+    HMODULE m = GetModuleHandleW(L"iscsidsc.dll");
+    DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | (m ? FORMAT_MESSAGE_FROM_HMODULE : 0);
+    FormatMessageW(flags, m, code, 0, (LPWSTR)&msg, 0, nullptr);
+    char hexCode[16];
+    std::snprintf(hexCode, sizeof hexCode, "0x%08lX", (unsigned long)code);
+    std::string s = msg ? trim(pathToUtf8(fs::path(msg))) + " (" + hexCode + ")" : std::string("error ") + hexCode;
+    if (msg) LocalFree(msg);
+    return s;
+}
+
+// Starts Windows' own iSCSI initiator service (MSiSCSI), which is set to start when asked.
+bool startInitiator(std::string& why) {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return why = "Could not reach the service manager: " + winError(GetLastError()), false;
+    SC_HANDLE svc = OpenServiceW(scm, L"MSiSCSI", SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG | SERVICE_START | SERVICE_CHANGE_CONFIG);
+    if (!svc) {
+        why = "Windows' iSCSI initiator service (MSiSCSI) isn't available: " + winError(GetLastError());
+        CloseServiceHandle(scm);
+        return false;
+    }
+    DWORD need = 0;
+    QueryServiceConfigW(svc, nullptr, 0, &need);
+    std::vector<uint8_t> cfg(need ? need : 1);
+    auto* qc = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(cfg.data());
+    if (need && QueryServiceConfigW(svc, qc, need, &need) && qc->dwStartType == SERVICE_DISABLED)  // back to "start when asked"
+        ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, SERVICE_DEMAND_START, SERVICE_NO_CHANGE, nullptr, nullptr, nullptr, nullptr, nullptr,
+                             nullptr, nullptr);
+    bool ok = true;
+    if (!StartServiceW(svc, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+        why = "Could not start Windows' iSCSI initiator service: " + winError(GetLastError());
+        ok = false;
+    }
+    SERVICE_STATUS ss{};
+    for (int i = 0; ok && i < 150; ++i) {
+        if (QueryServiceStatus(svc, &ss) && ss.dwCurrentState == SERVICE_RUNNING) break;
+        Sleep(100);
+    }
+    if (ok && ss.dwCurrentState != SERVICE_RUNNING) why = "Windows' iSCSI initiator service didn't start", ok = false;
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return ok;
+}
+
+std::string descString(const std::vector<uint8_t>& desc, DWORD off) {
+    if (!off || off >= desc.size()) return {};
+    std::string s(reinterpret_cast<const char*>(desc.data()) + off);
+    return trim(s);
+}
+
+}  // namespace
+
 int RamDrive::helperMain(const std::vector<std::string>& args) {
-    // <exe> --ramdrive-helper <vhdx> <bytes> <letter> <parent pid> <stop event> <log>
+    // <exe> --ramdrive-helper - <bytes> <letter> <parent pid> <stop event> <log>
     if (args.size() < 8 || args[1] != "--ramdrive-helper") return -1;
-    std::wstring vhdx = u8path(args[2]).wstring(), log = u8path(args[7]).wstring();
+    std::wstring log = u8path(args[7]).wstring();
     uint64_t size = std::strtoull(args[3].c_str(), nullptr, 10);
     char letter = (char)std::toupper((unsigned char)args[4][0]);
     DWORD ppid = (DWORD)std::strtoul(args[5].c_str(), nullptr, 10);
@@ -206,56 +262,109 @@ int RamDrive::helperMain(const std::vector<std::string>& args) {
     HANDLE stopEvent = OpenEventW(SYNCHRONIZE, FALSE, eventName.c_str());
     if (!parent || !stopEvent) return fail("Kompressor stopped before the drive was made");
 
-    // A dynamic VHDX: the file only grows as data is written.
-    size = std::max<uint64_t>(size, 64ull << 20);
-    size = (size + (1ull << 20) - 1) & ~((1ull << 20) - 1);
-    DeleteFileW(vhdx.c_str());
-    VIRTUAL_STORAGE_TYPE vst{VIRTUAL_STORAGE_TYPE_DEVICE_VHDX, VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT};
-    CREATE_VIRTUAL_DISK_PARAMETERS cp{};
-    cp.Version = CREATE_VIRTUAL_DISK_VERSION_2;
-    cp.Version2.MaximumSize = size;
-    HANDLE vd = nullptr;
-    DWORD r = CreateVirtualDisk(&vst, vhdx.c_str(), VIRTUAL_DISK_ACCESS_NONE, nullptr, CREATE_VIRTUAL_DISK_FLAG_NONE, 0, &cp,
-                                nullptr, &vd);
-    if (r != ERROR_SUCCESS) return fail("Could not create the virtual disk: " + winError(r));
-    auto drop = [&] {
-        CloseHandle(vd);  // detaches it when attached (the attachment lasts only as long as this handle)
-        for (int i = 0; i < 50 && !DeleteFileW(vhdx.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND; ++i) Sleep(100);
+    // The disk's blocks live in this process's memory; Windows' iSCSI initiator attaches it as a disk.
+    std::string why;
+    if (!startInitiator(why)) return fail(why);
+    MemDisk mem;
+    if (!mem.start(size, why)) return fail(why);
+    size = mem.size();
+
+    ISCSI_TARGET_PORTALW portal{};
+    wcscpy_s(portal.Address, L"127.0.0.1");
+    portal.Socket = mem.port();
+    std::string user = mem.chapName(), secret = mem.chapSecret();
+    ISCSI_LOGIN_OPTIONS lo{};
+    lo.Version = ISCSI_LOGIN_OPTIONS_VERSION;
+    lo.InformationSpecified = ISCSI_LOGIN_OPTIONS_AUTH_TYPE | ISCSI_LOGIN_OPTIONS_USERNAME | ISCSI_LOGIN_OPTIONS_PASSWORD;
+    lo.AuthType = ISCSI_CHAP_AUTH_TYPE;
+    lo.UsernameLength = (ULONG)user.size();
+    lo.Username = (PUCHAR)user.data();
+    lo.PasswordLength = (ULONG)secret.size();
+    lo.Password = (PUCHAR)secret.data();
+    std::wstring target = u8path(mem.targetName()).wstring();
+    // The initiator only logs in to targets it knows: tell it about this one (not kept across restarts),
+    // and forget it again once logged in or on failure.
+    ISCSI_TARGET_PORTAL_GROUPW group{};
+    group.Count = 1;
+    group.Portals[0] = portal;
+    DWORD st = AddIScsiStaticTargetW(target.data(), nullptr, 0, FALSE, nullptr, &lo, &group);
+    if (st != ERROR_SUCCESS) return fail("Windows' iSCSI initiator would not take the memory disk: " + iscsiError(st));
+    ISCSI_UNIQUE_SESSION_ID sid{}, cid{};
+    st = LoginIScsiTargetW(target.data(), FALSE, nullptr, ISCSI_ANY_INITIATOR_PORT, &portal, 0, nullptr, &lo, 0, nullptr, FALSE, &sid, &cid);
+    RemoveIScsiStaticTargetW(target.data());
+    if (st != ERROR_SUCCESS) return fail("Windows' iSCSI initiator could not attach the memory disk: " + iscsiError(st));
+
+    wchar_t root[] = {(wchar_t)letter, L':', L'\\', 0};
+    wchar_t volPath[] = {L'\\', L'\\', L'.', L'\\', (wchar_t)letter, L':', 0};
+    auto detach = [&] {
+        // Let go of the volume first, or Windows refuses to log out while it's in use.
+        HANDLE v = CreateFileW(volPath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (v != INVALID_HANDLE_VALUE) {
+            DWORD got = 0;
+            DeviceIoControl(v, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+            DeviceIoControl(v, FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+            CloseHandle(v);
+        }
+        say("stopping: volume let go");
+        // Log out on a thread of its own: if Windows' call never returns, the memory is still freed
+        // and this process still ends (which ends that thread too).
+        struct Logout {
+            ISCSI_UNIQUE_SESSION_ID sid;
+            HANDLE done;
+            DWORD status = 0;
+        };
+        auto* lg = new Logout{sid, CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+        HANDLE th = CreateThread(nullptr, 0, [](void* p) -> DWORD {
+            auto* l = static_cast<Logout*>(p);
+            for (int i = 0; i < 40 && (l->status = LogoutIScsiTarget(&l->sid)) != ERROR_SUCCESS; ++i) Sleep(250);
+            SetEvent(l->done);
+            return 0;
+        }, lg, 0, nullptr);
+        bool finished = th && WaitForSingleObject(lg->done, 15000) == WAIT_OBJECT_0;
+        say(finished ? "stopping: logged out (" + std::to_string(lg->status) + ")" : "stopping: logout didn't return");
+        if (th) CloseHandle(th);
+        mem.stop();
+        say("stopping: memory freed");
+        if (finished) {
+            CloseHandle(lg->done);
+            delete lg;
+        }  // else the thread may still use it: left for the process exit
     };
-    ATTACH_VIRTUAL_DISK_PARAMETERS ap{};
-    ap.Version = ATTACH_VIRTUAL_DISK_VERSION_1;
-    r = AttachVirtualDisk(vd, nullptr, ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER, 0, &ap, nullptr);
-    if (r != ERROR_SUCCESS) {
-        drop();
-        return fail("Could not attach the virtual disk: " + winError(r));
-    }
 
     // Which disk number it got, then make sure that disk really is this new, empty one before
     // anything is written to it.
-    wchar_t phys[MAX_PATH] = {};
-    ULONG n = sizeof phys;
-    r = GetVirtualDiskPhysicalPath(vd, &n, phys);
-    const wchar_t* num = r == ERROR_SUCCESS ? wcsstr(phys, L"PhysicalDrive") : nullptr;
-    if (!num) {
-        drop();
-        return fail("Could not find the virtual disk's number");
+    int disk = -1;
+    std::vector<ISCSI_DEVICE_ON_SESSIONW> devs(4);
+    for (int i = 0; i < 150 && disk < 0; ++i) {
+        ULONG count = (ULONG)devs.size();
+        if (GetDevicesForIScsiSessionW(&sid, &count, devs.data()) == ERROR_SUCCESS)
+            for (ULONG k = 0; k < count && k < devs.size(); ++k)
+                if (devs[k].StorageDeviceNumber.DeviceType == FILE_DEVICE_DISK) disk = (int)devs[k].StorageDeviceNumber.DeviceNumber;
+        if (disk < 0) Sleep(100);
     }
-    int disk = _wtoi(num + 13);
-    std::string why;
-    HANDLE h = CreateFileW(phys, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (disk < 0) {
+        detach();
+        return fail("Windows attached the memory disk but didn't show it as a disk");
+    }
+    std::wstring phys = L"\\\\.\\PhysicalDrive" + std::to_wstring(disk);
+    HANDLE h = CreateFileW(phys.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         why = "could not open it: " + winError(GetLastError());
     } else {
         std::vector<uint8_t> lay(4096);
         GET_LENGTH_INFORMATION len{};
         DWORD got = 0;
-        // A virtual disk backed by a file (never a real disk)...
+        // Our memory disk, over iSCSI (never a real disk)...
         STORAGE_PROPERTY_QUERY q{};
         q.PropertyId = StorageDeviceProperty;
         q.QueryType = PropertyStandardQuery;
         std::vector<uint8_t> desc(1024);
-        bool virt = DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, desc.data(), (DWORD)desc.size(), &got, nullptr) &&
-                    ((STORAGE_DEVICE_DESCRIPTOR*)desc.data())->BusType == BusTypeFileBackedVirtual;
+        bool ours = false;
+        if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, desc.data(), (DWORD)desc.size() - 1, &got, nullptr)) {
+            auto* sd = (STORAGE_DEVICE_DESCRIPTOR*)desc.data();
+            ours = sd->BusType == BusTypeiScsi && descString(desc, sd->VendorIdOffset) == MemDisk::vendor() &&
+                   descString(desc, sd->ProductIdOffset) == MemDisk::product();
+        }
         // ...with no partitions (Windows reports a blank disk as RAW, or as MBR with only empty slots)...
         bool empty = false;
         if (DeviceIoControl(h, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, nullptr, 0, lay.data(), (DWORD)lay.size(), &got, nullptr)) {
@@ -268,8 +377,8 @@ int RamDrive::helperMain(const std::vector<std::string>& args) {
             }
         }
         // ...of exactly the size just made.
-        if (!virt)
-            why = "it isn't a virtual disk";
+        if (!ours)
+            why = "it isn't Kompressor's memory disk";
         else if (!empty)
             why = "it already has partitions";
         else if (!DeviceIoControl(h, IOCTL_DISK_GET_LENGTH_INFO, nullptr, 0, &len, sizeof len, &got, nullptr))
@@ -279,8 +388,8 @@ int RamDrive::helperMain(const std::vector<std::string>& args) {
         CloseHandle(h);
     }
     if (!why.empty()) {
-        drop();
-        return fail("The new virtual disk (" + pathToUtf8(fs::path(phys)) + ") was left alone: " + why);
+        detach();
+        return fail("Disk " + std::to_string(disk) + " was left alone: " + why);
     }
 
     // Partition, format and name it with diskpart.
@@ -303,21 +412,20 @@ int RamDrive::helperMain(const std::vector<std::string>& args) {
     std::string out;
     int rc = runTool({"diskpart", "/s", pathToUtf8(fs::path(script))}, out);
     DeleteFileW(script.c_str());
-    wchar_t root[] = {(wchar_t)letter, L':', L'\\', 0};
     if (rc != 0 || GetDriveTypeW(root) != DRIVE_FIXED) {
-        drop();
-        std::string why = lastLine(out);
-        return fail("Could not format the drive" + (why.empty() ? std::string() : ": " + why));
+        detach();
+        std::string last = lastLine(out);
+        return fail("Could not format the drive" + (last.empty() ? std::string() : ": " + last));
     }
     say("ready");
 
     // Hold it until Kompressor asks to stop it, or exits.
     HANDLE wait[2] = {stopEvent, parent};
     WaitForMultipleObjects(2, wait, FALSE, INFINITE);
-    DetachVirtualDisk(vd, DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
-    drop();
+    detach();
     CloseHandle(parent);
     CloseHandle(stopEvent);
+    DeleteFileW(log.c_str());  // the steps above stay in it only if stopping went wrong
     return 0;
 }
 
@@ -332,19 +440,18 @@ bool RamDrive::start(uint64_t capacity, char letter, std::string& err) {
     fs::path dir = fs::temp_directory_path() / "Kompressor";
     std::error_code ec;
     fs::create_directories(dir, ec);
-    fs::path vhdx = dir / ("ramdrive-" + tag + ".vhdx"), log = dir / ("ramdrive-" + tag + ".log");
+    fs::path log = dir / ("ramdrive-" + tag + ".log");
     fs::remove(log, ec);
     std::wstring eventName = L"Local\\KompressorRamDrive-" + u8path(tag).wstring();
 
     auto impl = std::make_unique<Impl>();
     impl->cap = capacity;
-    impl->vhdx = vhdx.wstring();
     impl->stopEvent = CreateEventW(nullptr, TRUE, FALSE, eventName.c_str());
     if (!impl->stopEvent) return err = "Could not start the drive: " + winError(GetLastError()), false;
 
     wchar_t exe[MAX_PATH * 2];
     GetModuleFileNameW(nullptr, exe, MAX_PATH * 2);
-    std::wstring params = L"--ramdrive-helper \"" + vhdx.wstring() + L"\" " + std::to_wstring(capacity) + L" " + (wchar_t)letter + L" " +
+    std::wstring params = L"--ramdrive-helper - " + std::to_wstring(capacity) + L" " + (wchar_t)letter + L" " +
                           std::to_wstring(GetCurrentProcessId()) + L" " + eventName + L" \"" + log.wstring() + L"\"";
     SHELLEXECUTEINFOW ei{};
     ei.cbSize = sizeof ei;
@@ -391,7 +498,6 @@ void RamDrive::stop() {
     WaitForSingleObject(impl_->helper, 60000);
     CloseHandle(impl_->helper);
     CloseHandle(impl_->stopEvent);
-    for (int i = 0; i < 20 && !DeleteFileW(impl_->vhdx.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND; ++i) Sleep(100);
     impl_.reset();
     where_.clear();
 }

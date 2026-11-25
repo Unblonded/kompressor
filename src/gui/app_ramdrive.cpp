@@ -1,5 +1,5 @@
-// The RAM Drive window: a scratch drive that's deleted when it stops - a local drive on a temporary
-// virtual disk on Windows, a RAM disk on macOS, a folder in /dev/shm on Linux (see kz_ramdrive.hpp).
+// The RAM Drive window: a scratch drive that's deleted when it stops - a local drive held in memory on
+// Windows, a RAM disk on macOS, a folder in /dev/shm on Linux (see kz_ramdrive.hpp).
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -187,9 +187,9 @@ void App::drawRamDriveWindow() {
         ImGui::Dummy(ImVec2(0, em * 0.4f));
         wrapped(col::Faint,
 #ifdef _WIN32
-                "A local drive in File Explorer, on a virtual disk kept in a temporary file that Windows caches in "
-                "memory. Making it asks for administrator approval. It's removed, and its file deleted, when it "
-                "stops or Kompressor closes."
+                "A local drive in File Explorer whose files are held in RAM: memory is used as you copy files in and "
+                "freed as you delete them. Making it asks for administrator approval. It's removed, and everything "
+                "on it gone, when it stops or Kompressor closes."
 #elif defined(__APPLE__)
                 "A RAM disk in Finder. It's ejected, and everything on it deleted, when it stops or Kompressor closes."
 #else
