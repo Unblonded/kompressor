@@ -502,7 +502,8 @@ int main(int argc, char** argv) {
                 if (since < minFrame) std::this_thread::sleep_for(minFrame - since);
             }
             lastFrame = std::chrono::steady_clock::now();
-            if (static const char* fpsLog = std::getenv("KZ_FPS_LOG")) {  // debug aid: frames per second to a file
+            static const char* fpsLog = std::getenv("KZ_FPS_LOG");  // debug aid: frames per second to a file
+            if (fpsLog) {
                 static int frames = 0;
                 static auto t0 = lastFrame;
                 ++frames;
