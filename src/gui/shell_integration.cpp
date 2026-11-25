@@ -220,11 +220,13 @@ bool registerMenu(std::string& err) {
     // hold two cascades with the same name) get open / extract on top.
     bool ok = addItem(kFilesMenu, L"1compress", L"Compress...", L"compress", exe) &&
          addItem(kFilesMenu, L"2super", L"Super compress...", L"super", exe) &&
+         addItem(kFilesMenu, L"3hash", L"Checksums", L"hash", exe, true) &&
          addItem(kArchiveMenu, L"1open", L"Open", L"open", exe) &&
          addItem(kArchiveMenu, L"2here", L"Extract here", L"extract-here", exe) &&
          addItem(kArchiveMenu, L"3to", L"Extract to folder", L"extract-to", exe) &&
          addItem(kArchiveMenu, L"4compress", L"Compress...", L"compress", exe, true) &&
          addItem(kArchiveMenu, L"5super", L"Super compress...", L"super", exe) &&
+         addItem(kArchiveMenu, L"6hash", L"Checksums", L"hash", exe, true) &&
          addCascade(L"*", kFilesMenu, exe, archiveQuery(true));
     if (ok) {
         std::wstring k = std::wstring(kClasses) + L"*\\shell\\KompressorArchive";

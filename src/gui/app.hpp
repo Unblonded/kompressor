@@ -161,6 +161,8 @@ public:
     // Opens an archive and shows its Extract dialog / runs its integrity test (Explorer menu).
     void openExtractDialog(const std::string& path);
     void testArchiveFile(const std::string& path);
+    // Checksums window for files and folders on disk (File menu, Explorer's "Checksums").
+    void hashFiles(const std::vector<std::string>& paths);
     // Close the window once every extractFile() / quickCompress() job has succeeded (Explorer menu launches).
     void quitWhenDone() { quitWhenDone_ = true; }
     // Explorer menu launches that need no dialog: a small window with only the task's progress in place
@@ -373,6 +375,8 @@ private:
     } conv_;
     struct HashState {
         bool open = false, focus = false;
+        std::vector<std::string> files;  // files and folders on disk; empty = the files of an archive (`src`)
+        std::string base;                // on disk: the folder names are relative to
         int tabId = -1;
         kz::Source src;
         std::string title, password, scope;

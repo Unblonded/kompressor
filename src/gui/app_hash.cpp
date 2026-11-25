@@ -1,11 +1,12 @@
-// The Checksums window: CRC32 / MD5 / SHA-1 / SHA-256 of the files in an archive, saved or copied as
-// a hash list, and checked against a .sha256 / .md5 / .sha1 / .sfv list.
+// The Checksums window: CRC32 / MD5 / SHA-1 / SHA-256 of the files in an archive, or of files and
+// folders on disk, saved or copied as a hash list, and checked against a .sha256 / .md5 / .sha1 / .sfv list.
 #include <imgui_internal.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 
@@ -59,6 +60,23 @@ void App::actionHash(ExplorerTab& t, bool selectionOnly) {
     runHash(maskOf(hash_.algo));
 }
 
+void App::hashFiles(const std::vector<std::string>& paths) {
+    if (paths.empty()) return;
+    if (hash_.prog) hash_.prog->cancel = true;
+    bool algo[4];
+    std::copy(hash_.algo, hash_.algo + 4, algo);
+    hash_ = HashState();
+    std::copy(algo, algo + 4, hash_.algo);
+    hash_.open = hash_.focus = true;
+    hash_.files = paths;
+    hash_.title = paths.size() == 1 ? kz::fileNameOf(paths[0]) : std::to_string(paths.size()) + " items";
+    std::error_code ec;
+    bool folder = paths.size() == 1 && std::filesystem::is_directory(kz::u8path(paths[0]), ec);
+    hash_.scope = folder ? "every file in the folder" : paths.size() == 1 ? "file on disk" : "files on disk";
+    if (!maskOf(hash_.algo)) hash_.algo[3] = true;
+    runHash(maskOf(hash_.algo));
+}
+
 void App::runHash(unsigned which) {
     if (hash_.prog) hash_.prog->cancel = true;
     int run = ++hash_.runId;
@@ -68,15 +86,20 @@ void App::runHash(unsigned which) {
     kz::Source src = hash_.src;
     std::vector<std::string> only = hash_.only;
     std::string pw = hash_.password, title = hash_.title;
+    std::vector<std::string> files = hash_.files;
+    auto base = std::make_shared<std::string>();
     Job& j = startJob("Checksums for " + title,
-        [=](kz::Progress& p, std::string& err) { return kz::hashArchive(src, only, pw, which, *out, p, err); },
-        [this, run, which, out, title](Job& j) {
+        [=](kz::Progress& p, std::string& err) {
+            return files.empty() ? kz::hashArchive(src, only, pw, which, *out, p, err) : kz::hashFiles(files, which, *out, *base, p, err);
+        },
+        [this, run, which, out, base, title](Job& j) {
             if (run != hash_.runId) return;  // a newer run replaced this one
             hash_.running = false;
             hash_.prog.reset();
             for (auto& w : j.prog->warnings()) log(col::Warn, w);
             if (j.ok) {
                 hash_.results = std::move(*out);
+                if (!hash_.files.empty()) hash_.base = *base;
                 hash_.computed = which;
                 size_t bad = 0;
                 for (auto& h : hash_.results) bad += !h.error.empty();
@@ -141,8 +164,12 @@ void App::loadHashList(const std::string& path) {
 }
 
 void App::saveHashList(kz::HashKind k) {
-    std::string name = kz::stripArchiveExt(hash_.title) + kz::hashListExt(k);
-    std::string dir = hash_.src.inMemory() ? lastDir_ : parentDir(hash_.src.path);
+    // On disk the list goes in the folder its names are relative to, so sha256sum -c works there.
+    bool onDisk = !hash_.files.empty();
+    std::string stem = onDisk ? (hash_.files.size() == 1 ? hash_.title : kz::fileNameOf(hash_.base)) : kz::stripArchiveExt(hash_.title);
+    if (stem.empty()) stem = "checksums";
+    std::string name = stem + kz::hashListExt(k);
+    std::string dir = onDisk ? hash_.base : hash_.src.inMemory() ? lastDir_ : parentDir(hash_.src.path);
     fileDlg_.open("Save Checksum List", FileDialog::Mode::SaveFile, dir, [this, k](const std::vector<std::string>& p) {
         std::string text = kz::formatHashList(hash_.results, k);
         std::ofstream f(kz::u8path(p[0]), std::ios::binary);
@@ -240,7 +267,7 @@ void App::drawHashWindow() {
         toggle("Problems only", &hash_.problemsOnly);
     }
 
-    // Rows: the archive's files, then listed names the archive doesn't have.
+    // Rows: the files hashed, then listed names that weren't found.
     struct Row {
         const kz::EntryHash* h;
         const kz::HashCheck* c;
@@ -307,9 +334,10 @@ void App::drawHashWindow() {
                         const ImVec4 colr[] = {col::Ok, col::Error, col::Warn, col::Warn};
                         chip(word[row.c->state], colr[row.c->state], row.c->state == kz::HashCheck::Mismatch);
                         if (row.c->state == kz::HashCheck::Mismatch && ImGui::IsItemHovered())
-                            ImGui::SetTooltip("List:     %s\nArchive:  %s", row.c->expected.c_str(), row.c->actual.c_str());
+                            ImGui::SetTooltip("List:     %s\nActual:   %s", row.c->expected.c_str(), row.c->actual.c_str());
                         if (row.c->state == kz::HashCheck::Missing && ImGui::IsItemHovered())
-                            ImGui::SetTooltip("The list names this file, but the archive doesn't have it");
+                            ImGui::SetTooltip(hash_.files.empty() ? "The list names this file, but the archive doesn't have it"
+                                                                           : "The list names this file, but it isn't there");
                     }
                 }
                 ImGui::TableSetColumnIndex(ci++);

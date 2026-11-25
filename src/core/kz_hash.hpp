@@ -44,6 +44,13 @@ struct EntryHash {
 bool hashArchive(const Source& src, const std::vector<std::string>& only, const std::string& password, unsigned which,
                  std::vector<EntryHash>& out, Progress& prog, std::string& err);
 
+// Hashes files on disk: the files given, and every file inside the folders given (recursively).
+// Paths in `out` are '/' separated and relative to `base` (set here): the folder itself when one
+// folder is given, otherwise the folder holding the inputs - so a list saved in `base` can be
+// checked there with sha256sum -c. Files that can't be read are listed with their error.
+bool hashFiles(const std::vector<std::string>& inputs, unsigned which, std::vector<EntryHash>& out, std::string& base,
+               Progress& prog, std::string& err);
+
 // A hash list: one "<hex>  <name>" (or "<hex> *<name>") per line, as sha256sum writes.
 std::string formatHashList(const std::vector<EntryHash>& hashes, HashKind kind);
 

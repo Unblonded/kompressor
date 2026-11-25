@@ -12,6 +12,7 @@ A cross-platform (Windows · macOS · Linux) file compressor written in C++17 wi
 * Integrity **Test**, password prompts, background jobs you can **pause**, resume or cancel, drag & drop.
 * **Maximum performance** mode (Settings, or `--max-cpu` in the CLI): while a job runs it gets every core at high priority, Windows power throttling off, the fastest power plan (yours comes back afterwards) and no sleep.
 * **Graphics card help** for ZIP (Settings, or `--gpu` in the CLI; Windows): the graphics card searches for repeated data alongside the CPU through Direct3D 11 compute shaders, which come with Windows. It takes only the pieces it will finish before the CPU would get to them, so it never slows a job down. The result is an ordinary ZIP about the same size.
+* **Checksums** (CRC32, MD5, SHA-1, SHA-256) of the files inside an archive without extracting them, or of files and folders on disk (File > Checksums of Files, or **Checksums** in the right-click menu). Lists can be saved or copied in sha256sum / md5sum / .sfv form, and checked against such a list.
 * **RAM Drive** (File > RAM Drive, or `kompressor-cli ramdrive`): a fast scratch drive that cleans itself up. On Windows it's a local NTFS drive (e.g. R:, under "Devices and drives") on a temporary virtual disk made with Windows' own VHDX support; making it asks for administrator approval once, and the disk is removed and its file deleted when the drive stops or Kompressor exits, even if Kompressor crashes. On macOS it's a real RAM disk (`hdiutil ram://`) in Finder; on Linux a folder in `/dev/shm`, which is memory. No driver or other software is installed.
 * A scriptable `kompressor-cli` built from the same core.
 
@@ -107,6 +108,7 @@ kompressor-cli test    <archive>
 kompressor-cli cat     <archive> <entry>            # one member to stdout
 kompressor-cli grep    <archive> <text> [--case] [--hex] [--names "*.txt"]   # find text or bytes inside the files
 kompressor-cli hash    <archive> [-a crc32|md5|sha1|sha256|all] [-c list.sha256]   # checksums, or check a list
+kompressor-cli sum     <files/folders> [-a crc32|md5|sha1|sha256|all] [-c list.sha256]   # the same for files on disk
 kompressor-cli create  out.7z|.zip|.tar.xz|... <files/folders> [-l level] [-p pw]
 kompressor-cli super   out.kmp <files/folders> [-m fast|balanced|ultra|max|extreme|ultimate] [--no-dedup]
 kompressor-cli convert <any-archive> out.7z|.zip|.tar.zst|.kmp|... [-l level] [-m mode] [-p pw] [-e new-pw]

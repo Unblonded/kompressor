@@ -41,6 +41,8 @@ static void usage() {
         "  kompressor-cli test    <archive> [-p password]\n"
         "  kompressor-cli hash    <archive> [-a crc32|md5|sha1|sha256|all] [-c list] [-p password] [entry...]\n"
         "                         (checksums of the files inside; -c checks them against a .sha256/.md5/.sfv list)\n"
+        "  kompressor-cli sum     <files/folders...> [-a crc32|md5|sha1|sha256|all] [-c list]\n"
+        "                         (checksums of files on disk; names are relative to the folder given, or the inputs' folder)\n"
         "  kompressor-cli grep    <archive> <text> [--case] [--hex] [--names \"*.txt;*.ini\"] [-p password] [entry...]\n"
         "                         (find text - UTF-8 or UTF-16 - or hex bytes inside the files; case-insensitive unless --case)\n"
         "  kompressor-cli cat     <archive> <entry> [-p password]      (write one member to stdout)\n"
@@ -299,8 +301,9 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (cmd == "hash" || cmd == "h") {
+    if (cmd == "hash" || cmd == "h" || cmd == "sum") {
         if (pos.empty()) return usage(), 1;
+        const bool onDisk = cmd == "sum";  // files and folders, not the files inside an archive
         Source src{pos[0], nullptr, ""};
         std::vector<ListedHash> listed;
         unsigned which = 0;
@@ -325,7 +328,10 @@ int main(int argc, char** argv) {
         else return usage(), 1;
         std::vector<std::string> only(pos.begin() + 1, pos.end());
         std::vector<EntryHash> hashes;
-        bool ok = run(prog, [&] { return hashArchive(src, only, password, which, hashes, prog, err); });
+        std::string base;
+        bool ok = run(prog, [&] {
+            return onDisk ? hashFiles(pos, which, hashes, base, prog, err) : hashArchive(src, only, password, which, hashes, prog, err);
+        });
         printWarnings(prog);
         if (!ok) {
             std::fprintf(stderr, "error: %s\n", err.c_str());

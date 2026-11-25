@@ -378,6 +378,8 @@ int main(int argc, char** argv) {
                 app.quitWhenDone();
             } else if (shellAction == "extract") {
                 for (auto& p : shellPaths) app.openExtractDialog(p);
+            } else if (shellAction == "hash") {
+                app.hashFiles(shellPaths);
             } else if (shellAction == "test") {
                 for (auto& p : shellPaths) app.testArchiveFile(p);
             } else if (shellAction == "add-7z" || shellAction == "add-zip" || shellAction == "add-kmp") {

@@ -31,9 +31,9 @@ HINSTANCE g_inst = nullptr;
 LONG g_objects = 0, g_locks = 0;
 
 // The --shell actions Kompressor.exe understands (see main.cpp).
-enum Cmd { COpen, CExtract, CHere, CTo, CTest, CCompress, CSuper, CAdd7z, CAddZip, CAddKmp };
+enum Cmd { COpen, CExtract, CHere, CTo, CTest, CCompress, CSuper, CAdd7z, CAddZip, CAddKmp, CHash };
 const wchar_t* const kActions[] = {L"open", L"extract", L"extract-here", L"extract-to", L"test",
-                                   L"compress", L"super", L"add-7z", L"add-zip", L"add-kmp"};
+                                   L"compress", L"super", L"add-7z", L"add-zip", L"add-kmp", L"hash"};
 const wchar_t* const kHelp[] = {L"Browse the archive in Kompressor",
                                 L"Choose where to extract the archive",
                                 L"Extract next to the archive",
@@ -43,7 +43,8 @@ const wchar_t* const kHelp[] = {L"Browse the archive in Kompressor",
                                 L"Pack into Kompressor's .kmp format, with options",
                                 L"Compress into a 7z archive next to the selection",
                                 L"Compress into a ZIP archive next to the selection",
-                                L"Super compress into a .kmp archive next to the selection"};
+                                L"Super compress into a .kmp archive next to the selection",
+                                L"CRC32, MD5, SHA-1 and SHA-256 of the selected files"};
 
 std::wstring lower(std::wstring s) {
     for (auto& c : s) c = (wchar_t)std::towlower(c);
@@ -282,6 +283,8 @@ public:
         add(CAdd7z, L"Add to \"" + stem + L".7z\"");
         add(CAddZip, L"Add to \"" + stem + L".zip\"");
         add(CAddKmp, L"Add to \"" + stem + L".kmp\"");
+        AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+        add(CHash, L"Checksums");
 
         // Where Explorer asks: in the first group, after the other extensions' entries and above "Open with".
         int count = GetMenuItemCount(menu);

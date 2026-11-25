@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 
@@ -261,6 +263,121 @@ bool hashArchive(const Source& src, const std::vector<std::string>& only, const 
             if (d[i]) *slot[i] = d[i]->hex();
     };
     return visitEntries(src, password, v, prog, err);
+}
+
+bool hashFiles(const std::vector<std::string>& inputs, unsigned which, std::vector<EntryHash>& out, std::string& base,
+               Progress& prog, std::string& err) {
+    namespace fs = std::filesystem;
+    out.clear();
+    base.clear();
+    if (inputs.empty()) return err = "Nothing to hash", false;
+    std::error_code ec;
+    // The base: one folder -> itself; otherwise the folder the inputs share.
+    std::vector<fs::path> ins;
+    for (auto& i : inputs) {
+        fs::path p = fs::absolute(u8path(i), ec).lexically_normal();
+        if (!p.has_filename() && p.has_parent_path() && p != p.root_path()) p = p.parent_path();  // "dir\" -> "dir"
+        ins.push_back(p);
+    }
+    fs::path b;
+    if (ins.size() == 1 && fs::is_directory(ins[0], ec)) {
+        b = ins[0];
+    } else {
+        b = ins[0].parent_path();
+        for (size_t i = 1; i < ins.size(); ++i) {
+            fs::path parent = ins[i].parent_path(), common;
+            auto x = b.begin(), y = parent.begin();
+            for (; x != b.end() && y != parent.end(); ++x, ++y) {
+                std::string sx = pathToUtf8(*x), sy = pathToUtf8(*y);
+                bool same = sx.size() == sy.size() && std::equal(sx.begin(), sx.end(), sy.begin(), [](char a, char c) {
+                                return std::tolower((unsigned char)a) == std::tolower((unsigned char)c);
+                            });
+                if (!same) break;
+                common /= *x;
+            }
+            b = common;
+        }
+    }
+    base = pathToUtf8(b);
+
+    // Every file, with its size, so progress can count bytes.
+    struct F {
+        fs::path p;
+        std::string rel;
+        uint64_t size;
+    };
+    std::vector<F> files;
+    auto relOf = [&](const fs::path& p) {
+        std::string r = pathToUtf8(p.lexically_relative(b));
+        if (r.empty() || r == ".") r = pathToUtf8(p.filename());
+        std::replace(r.begin(), r.end(), '\\', '/');
+        return r;
+    };
+    for (auto& in : ins) {
+        if (prog.cancelled()) return err = "Cancelled", false;
+        if (fs::is_directory(in, ec)) {
+            prog.setStatus("Listing " + pathToUtf8(in.filename()));
+            for (auto it = fs::recursive_directory_iterator(in, fs::directory_options::skip_permission_denied, ec);
+                 !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                std::error_code e2;
+                if (!it->is_regular_file(e2)) continue;
+                files.push_back({it->path(), relOf(it->path()), (uint64_t)it->file_size(e2)});
+                if ((files.size() & 1023) == 0 && prog.cancelled()) return err = "Cancelled", false;
+            }
+            if (ec) prog.warn("Could not list everything in " + pathToUtf8(in) + ": " + ec.message());
+            ec.clear();
+        } else if (fs::is_regular_file(in, ec)) {
+            files.push_back({in, relOf(in), (uint64_t)fs::file_size(in, ec)});
+        } else {
+            EntryHash h;
+            h.path = relOf(in);
+            h.error = "Not found";
+            out.push_back(h);
+        }
+    }
+    std::sort(files.begin(), files.end(), [](const F& x, const F& y) { return x.rel < y.rel; });
+    uint64_t total = 0;
+    for (auto& f : files) total += f.size;
+    prog.total = total;
+    prog.done = 0;
+
+    static const HashKind kinds[] = {kHashCrc32, kHashMd5, kHashSha1, kHashSha256};
+    std::vector<uint8_t> buf(1 << 20);
+    for (auto& f : files) {
+        if (prog.cancelled()) return err = "Cancelled", false;
+        prog.setStatus(f.rel);
+        EntryHash h;
+        h.path = f.rel;
+        h.size = f.size;
+        std::unique_ptr<Digest> d[4];
+        for (int i = 0; i < 4; ++i)
+            if (which & kinds[i]) d[i] = std::make_unique<Digest>(kinds[i]);
+        std::ifstream in(f.p, std::ios::binary);
+        if (!in) {
+            h.error = "Could not be opened";
+        } else {
+            uint64_t got = 0;
+            while (in) {
+                in.read((char*)buf.data(), (std::streamsize)buf.size());
+                size_t n = (size_t)in.gcount();
+                if (!n) break;
+                for (auto& x : d)
+                    if (x) x->update(buf.data(), n);
+                got += n;
+                prog.done += n;
+                if (prog.cancelled()) return err = "Cancelled", false;
+            }
+            if (in.bad()) h.error = "Could not be read completely";
+            else {
+                std::string* slot[] = {&h.crc32, &h.md5, &h.sha1, &h.sha256};
+                for (int i = 0; i < 4; ++i)
+                    if (d[i]) *slot[i] = d[i]->hex();
+                h.size = got;
+            }
+        }
+        out.push_back(std::move(h));
+    }
+    return true;
 }
 
 std::string formatHashList(const std::vector<EntryHash>& hashes, HashKind kind) {

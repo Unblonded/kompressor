@@ -741,6 +741,15 @@ void App::drawMenuBar() {
         if (ImGui::MenuItem("New Archive...", kN.c_str())) openCompressDialog({}, false);
         if (ImGui::MenuItem("Super Compress...", kSN.c_str())) openCompressDialog({}, true);
         ImGui::Separator();
+        if (ImGui::MenuItem("Checksums of Files...")) {
+            fileDlg_.open("Checksums of Files", FileDialog::Mode::AddFiles, lastDir_,
+                          [this](const std::vector<std::string>& p) { hashFiles(p); });
+        }
+        ImGui::SetItemTooltip("CRC32, MD5, SHA-1 and SHA-256 of files on disk, and checking them against a list");
+        if (ImGui::MenuItem("Checksums of a Folder...")) {
+            fileDlg_.open("Checksums of a Folder", FileDialog::Mode::AddFolders, lastDir_,
+                          [this](const std::vector<std::string>& p) { hashFiles(p); });
+        }
         if (ImGui::MenuItem("RAM Drive...", nullptr, !ram_.busy && ram_.drive != nullptr)) openRamDrive();
         ImGui::SetItemTooltip("A drive kept in memory, for fast scratch files; emptied when it stops");
         ImGui::Separator();
