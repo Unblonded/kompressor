@@ -64,6 +64,13 @@ imapi-udf150.iso	all
 imapi-udf201.iso	all
 imapi-udf250.iso	all
 udf.dmg	all
+# Inno Setup installers (ISCC), one per compression method
+inno-lzma2.exe	all
+inno-lzma2-nonsolid.exe	all
+inno-lzma.exe	all
+inno-zip.exe	all
+inno-bzip.exe	all
+inno-none.exe	all
 # Kompressor's own writers, read back
 kz.zip	all
 kz.7z	all

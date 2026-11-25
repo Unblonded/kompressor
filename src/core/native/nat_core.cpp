@@ -394,7 +394,7 @@ namespace {
 const Handler* const kHandlers[] = {
     &hVhdx, &hVhd, &hVdi, &hVmdk, &hQcow, &hSparse, &hDmg, &hLp,  //
     &hXar, &hCfb, &hChm, &hWim, &hArj, &hMslz, &hSwf, &hFlv, &hPpmd, &hUefi,  //
-    &hNsis, &hPe, &hTe, &hElf, &hMachO, &hMub,  //
+    &hInno, &hNsis, &hPe, &hTe, &hElf, &hMachO, &hMub,  //
     &hSquash, &hCramfs, &hApfs, &hHfs, &hUdf, &hExt, &hNtfs, &hExfat, &hFat, &hLvm,  //
     &hGpt, &hApm, &hMbr,  //
     &hBase64, &hIhex, &hCoff,
@@ -468,7 +468,8 @@ bool claimsFirst(const Source& src) {
     if (!s) return false;
     std::vector<uint8_t> head = s->getUpTo(0, 72 * 1024);
     // libarchive reads text files as "mtree" listings, so text formats are claimed here too.
-    if (hNsis.probe(*s, head, src.name()) || hIhex.probe(*s, head, src.name()) || hBase64.probe(*s, head, src.name()))
+    // Installers: libarchive would otherwise take an archive it finds inside them for the whole file.
+    if (hInno.probe(*s, head, src.name()) || hNsis.probe(*s, head, src.name()) || hIhex.probe(*s, head, src.name()) || hBase64.probe(*s, head, src.name()))
         return true;
     // A file starting with zeros reads as an empty tar to libarchive; disk images (UDF, ext...) do.
     if (head.size() >= 1024 && std::all_of(head.begin(), head.begin() + 1024, [](uint8_t b) { return b == 0; })) {

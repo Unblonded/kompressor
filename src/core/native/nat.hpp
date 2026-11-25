@@ -211,6 +211,7 @@ KZ_HANDLER(hUefi)
 KZ_HANDLER(hLp)
 KZ_HANDLER(hLvm)
 KZ_HANDLER(hXar)
+KZ_HANDLER(hInno)
 #undef KZ_HANDLER
 
 // ------------------------------------------------------------------------------------------- codecs

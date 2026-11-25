@@ -110,6 +110,28 @@ if (Test-Path (Join-Path $Out 'imapi-udf102.iso')) {
     Make 'udf.dmg' { & $python -I (Join-Path $gen 'mkdmg.py') (Join-Path $Out 'imapi-udf102.iso') (Join-Path $Out 'udf.dmg') }
 }
 
+"Inno Setup"
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+          "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc) { $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source }
+if ($iscc) {
+    $innoDir = Join-Path $Out '.inno'
+    New-Item -ItemType Directory -Force $innoDir | Out-Null
+    $variants = @(
+        @('inno-lzma2', 'lzma2', 'yes'), @('inno-lzma2-nonsolid', 'lzma2', 'no'), @('inno-lzma', 'lzma', 'yes'),
+        @('inno-zip', 'zip', 'no'), @('inno-bzip', 'bzip', 'no'), @('inno-none', 'none', 'no')
+    )
+    foreach ($v in $variants) {
+        $name = $v[0] + '.exe'
+        $iss = Join-Path $innoDir ($v[0] + '.iss')
+        $text = "[Setup]`r`nAppName=KzTest`r`nAppVersion=1.0`r`nDefaultDirName={autopf}\KzTest`r`nOutputDir=$Out`r`n" +
+                "OutputBaseFilename=$($v[0])`r`nCompression=$($v[1])`r`nSolidCompression=$($v[2])`r`n" +
+                "[Files]`r`nSource: `"$corpus\*`"; DestDir: `"{app}`"; Flags: recursesubdirs createallsubdirs`r`n"
+        [IO.File]::WriteAllText($iss, $text, (New-Object Text.UTF8Encoding($true)))
+        Make $name { & $iscc /Q $iss }
+    }
+} else { "  Inno Setup not installed" }
+
 "Kompressor (round trips through its own writers)"
 if (Test-Path $Cli) {
     $items = @(Get-ChildItem $corpus | ForEach-Object FullName)

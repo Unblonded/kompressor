@@ -97,6 +97,7 @@ add_library(kompressor_core STATIC
   src/core/native/nat_nsis.cpp
   src/core/native/nat_small.cpp
   src/core/native/nat_xar.cpp
+  src/core/native/nat_inno.cpp
   src/core/native/nat_arj.cpp
   src/core/native/nat_udf.cpp
   src/core/native/nat_lzfse.cpp

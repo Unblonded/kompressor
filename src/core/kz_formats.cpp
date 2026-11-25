@@ -101,6 +101,7 @@ const std::vector<std::pair<std::string, std::string>>& readableFormats() {
         {"EXE / DLL / SYS / EFI", "Windows programs: sections, resources (icons, bitmaps, version, manifest), overlay"},
         {"MSI / MSP / DOC / XLS / PPT / MSG", "Compound Files: installer and document streams, embedded cabinets"},
         {"NSIS installers", "Nullsoft setup programs: LZMA (solid), deflate and stored, with $INSTDIR/$PLUGINSDIR paths"},
+        {"Inno Setup installers", "Inno Setup 6 and 7: LZMA/LZMA2 (solid), zlib, bzip2, Zstandard and stored, checked by SHA-256"},
         {"WIM / SWM / ESD", "Windows images: XPRESS, LZX, LZMS, solid ESD, split images"},
         {"CHM / HXS", "compiled HTML help"},
         {"ARJ", "methods 0-4"},
